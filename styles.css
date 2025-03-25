@@ -1,0 +1,517 @@
+:root {
+    --primary-color: #6c5ce7;
+    --secondary-color: #a8a4ff;
+    --background: #f8f9fa;
+    --text-dark: #2d3436;
+    --scrollbar-width: 0px; /* 默认值，将通过JS动态计算 */
+}
+
+body {
+    margin: 0;
+    padding: 20px;
+    background: var(--background);
+    color: var(--text-dark);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+    user-select: none; /* 禁止文本选择 */
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    box-sizing: border-box;
+    width: 100%;
+    padding-right: calc(20px + var(--scrollbar-width, 15px));
+}
+
+.audio-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+    margin: 2rem 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.audio-item {
+    background: white;
+    border-radius: 10px;
+    padding: 0.7rem;
+    cursor: move;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    position: relative;
+    min-height: 50px;
+}
+
+.audio-item:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.audio-item::before {
+    content: "🎵";
+    font-size: 1.8rem;
+    filter: drop-shadow(1px 1px 1px rgba(0,0,0,0.1));
+    margin-right: 0.5rem;
+}
+
+.audio-item span {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-dark);
+    flex-grow: 1;
+}
+
+/* 添加音频分类样式 */
+.audio-category {
+    background: linear-gradient(135deg, var(--primary-color), #857bec);
+    border-radius: 12px;
+    padding: 0.8rem 1rem;
+    cursor: pointer;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    color: white;
+    position: relative;
+    height: fit-content;
+    box-sizing: border-box; /* 确保padding不会改变元素宽度 */
+    width: 100%; /* 确保宽度固定 */
+}
+
+.audio-category:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+}
+
+.audio-category-title {
+    font-size: 1rem;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.audio-category-icon {
+    font-size: 1.3rem;
+    margin-right: 0.5rem;
+}
+
+.audio-category-toggle {
+    transition: transform 0.3s ease;
+}
+
+.audio-category.expanded .audio-category-toggle {
+    transform: rotate(180deg);
+}
+
+.audio-items-container {
+    display: grid;
+    grid-template-columns: repeat(1, 1fr);
+    gap: 0.6rem;
+    margin-top: 0.8rem;
+    overflow: hidden;
+    max-height: 0;
+    transition: max-height 0.5s ease, padding 0.3s ease;
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 0 0 12px 12px;
+    padding: 0 0.8rem;
+    box-sizing: border-box; /* 确保padding不会改变元素宽度 */
+    width: 100%; /* 确保宽度固定 */
+}
+
+.audio-category.expanded .audio-items-container {
+    max-height: 300px; /* 保持高度限制，避免占用过多空间 */
+    padding: 0.8rem;
+    overflow-y: auto; /* 保留垂直滚动条 */
+    scrollbar-width: thin; /* Firefox细滚动条 */
+}
+
+/* 添加webkit浏览器的滚动条样式 */
+.audio-items-container::-webkit-scrollbar {
+    width: 8px; /* 滚动条宽度 */
+}
+
+.audio-items-container::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.1); /* 滚动条轨道背景 */
+    border-radius: 10px;
+}
+
+.audio-items-container::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3); /* 滚动条滑块颜色 */
+    border-radius: 10px;
+}
+
+.audio-items-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.5); /* 滚动条滑块悬停颜色 */
+}
+
+.track-area {
+    background: linear-gradient(135deg, #ffffff, #f8f8ff);
+    border: 2px dashed var(--secondary-color);
+    border-radius: 20px;
+    padding: 1.5rem 1.5rem 1.5rem 115px; /* 增加左侧padding以容纳音轨标识和音量控制 */
+    margin: 3rem 0;
+    position: relative;
+    min-height: 200px;
+}
+
+/* 修改播放指示器样式，增强拖动功能 */
+.playback-indicator {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 4px; /* 增加宽度，使其更容易点击 */
+    background-color: red;
+    z-index: 50; /* 确保指示器在最上层 */
+    pointer-events: all; /* 确保可以响应鼠标事件 */
+    box-shadow: 0 0 5px rgba(255, 0, 0, 0.5);
+    transition: none; /* 默认不使用过渡动画 */
+    left: 115px; /* 初始位置 */
+    cursor: grab; /* 使用grab光标 */
+    touch-action: none; /* 禁止触摸事件的默认行为 */
+}
+
+.playback-indicator::after {
+    content: "";
+    position: absolute;
+    top: -8px;
+    left: -6px;
+    width: 16px; /* 增加宽度 */
+    height: 16px; /* 增加高度 */
+    background-color: red;
+    border-radius: 50%;
+    cursor: grab;
+    box-shadow: 0 0 8px rgba(255, 0, 0, 0.6);
+}
+
+.playback-indicator:active::after {
+    cursor: grabbing;
+    transform: scale(1.2); /* 拖动时稍微变大，提供视觉反馈 */
+}
+
+.time-axis {
+    display: flex;
+    justify-content: space-between;
+    color: var(--secondary-color);
+    font-size: 0.9em;
+    margin-bottom: 1.5rem;
+    padding: 0 1rem;
+    position: relative;
+}
+
+.time-axis::after {
+    content: "";
+    position: absolute;
+    bottom: -10px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--secondary-color);
+    opacity: 0.3;
+}
+
+.track-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    position: relative;
+}
+
+.track-lane {
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: 12px;
+    padding: 0.5rem;
+    min-height: 72px;
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(30, 1fr);
+    grid-gap: 2px;
+    border: 2px solid var(--secondary-color);
+    box-shadow: 0 4px 8px rgba(108, 92, 231, 0.1);
+    margin-left: 0; /* 移除左边距，因为我们已经在track-area增加了左侧padding */
+}
+
+.track-lane::before {
+    content: attr(data-track-name);
+    position: absolute;
+    left: -100px; /* 向左移动，消除左侧空白 */
+    top: 30%; /* 调整到上方 */
+    transform: translateY(-50%);
+    color: var(--text-dark);
+    font-size: 0.9em;
+    font-weight: bold;
+    opacity: 0.8;
+    width: 80px; /* 增加宽度，确保文本有足够空间 */
+    text-align: center; /* 居中对齐 */
+}
+
+/* 添加音轨音量控制器样式 */
+.track-volume-control {
+    position: absolute;
+    left: -100px; /* 与音轨名称左对齐 */
+    top: 70%; /* 调整到下方 */
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center; /* 居中对齐 */
+    gap: 5px;
+    width: 80px; /* 与音轨名称宽度一致 */
+}
+
+.track-volume-control .volume-slider {
+    width: 50px; /* 增加滑块宽度 */
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(108, 92, 231, 0.2);
+    border-radius: 2px;
+    margin: 0;
+}
+
+.track-volume-control .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    background: var(--primary-color);
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.track-volume-control .volume-icon {
+    font-size: 0.75rem;
+    color: var(--primary-color);
+    opacity: 0.8;
+}
+
+.track-lane::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: repeating-linear-gradient(
+        90deg,
+        transparent,
+        transparent calc(100% / 30 - 1px),
+        rgba(108, 92, 231, 0.05) calc(100% / 30 - 1px),
+        rgba(108, 92, 231, 0.05) calc(100% / 30)
+    );
+    pointer-events: none;
+    border-radius: 12px;
+    z-index: 0;
+}
+
+.track-item {
+    background: linear-gradient(135deg, var(--primary-color), #857bec);
+    border-radius: 12px;
+    padding: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    box-shadow: 0 5px 10px rgba(108, 92, 231, 0.2);
+    border-left: 4px solid #4834d4;
+    transition: transform 0.2s;
+    position: relative;
+    z-index: 1;
+    grid-column: 1 / span 5; /* 默认占据5格，对应5秒 */
+    color: white;
+    cursor: grab;
+}
+
+.track-item:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 15px rgba(108, 92, 231, 0.3);
+}
+
+.track-item:active {
+    cursor: grabbing;
+}
+
+.track-controls {
+    display: flex;
+    align-items: center;
+    padding-left: 1rem;
+    border-left: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.remove-btn {
+    background: rgba(255,255,255,0.2);
+    border: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    box-sizing: border-box;
+    transition: all 0.2s;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0.7;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.remove-btn:hover {
+    background: rgba(255,0,0,0.6);
+    transform: scale(1.1);
+    opacity: 1;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+}
+
+.volume-slider {
+    width: 80px;
+    height: 4px;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background: rgba(108, 92, 231, 0.1);
+    border-radius: 2px;
+}
+
+.volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--primary-color);
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.remove-btn {
+    background: rgba(255,255,255,0.3);
+    border: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    box-sizing: border-box;
+    transition: all 0.2s;
+}
+
+.remove-btn:hover {
+    background: rgba(255,255,255,0.5);
+    transform: scale(1.1);
+}
+
+.controls {
+    text-align: center;
+    margin: 3rem 0;
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+}
+
+.control-btn {
+    background: linear-gradient(135deg, var(--primary-color), #857bec);
+    border: none;
+    color: white;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    font-size: 1.2rem;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 10px rgba(108, 92, 231, 0.2);
+}
+
+.control-btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(108, 92, 231, 0.3);
+}
+
+.play-btn {
+    background: linear-gradient(135deg, var(--primary-color), #857bec);
+    border: none;
+    color: white;
+    padding: 1rem 2.5rem;
+    border-radius: 30px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: inline-flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.play-btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(108, 92, 231, 0.3);
+}
+
+@media (max-width: 768px) {
+    .audio-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .track-item {
+        flex-wrap: wrap;
+        padding: 0.8rem;
+    }
+}
+
+/* 添加新的样式 */
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 10px 20px;
+    border-radius: 5px;
+    z-index: 1000;
+    animation: fadeInOut 2s ease-in-out;
+}
+
+@keyframes fadeInOut {
+    0% { opacity: 0; transform: translateY(-20px); }
+    10% { opacity: 1; transform: translateY(0); }
+    90% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-20px); }
+}
+
+.volume-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--primary-color);
+}
+
+.time-axis {
+    position: relative;
+    height: 20px;
+    margin-bottom: 1.5rem;
+}
+
+.time-axis span {
+    position: absolute;
+    transform: translateX(-50%);
+    font-size: 0.8em;
+    color: var(--secondary-color);
+}
+
+.track-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+}
