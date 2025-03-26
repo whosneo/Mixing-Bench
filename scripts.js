@@ -171,6 +171,12 @@ class AudioMixer {
         this.trackCount = 4; // 默认创建4条音轨
         this.loadingCount = 0; // 跟踪正在加载的音频数量
         
+        // 设置定期清理缓存的计时器
+        this.cacheCleanupInterval = setInterval(() => this.cleanupCache(), 60000); // 每分钟清理一次
+        
+        // 创建防抖函数
+        this.debouncedReorganize = this.debounce(this.reorganizeAllTracks.bind(this), 300);
+        
         this.init();
     }
 
@@ -184,6 +190,42 @@ class AudioMixer {
         this.initializeTracks();
         this.setupEventListeners();
         this.setupDragAndDrop();
+        
+        // 添加页面卸载时的资源清理
+        window.addEventListener('beforeunload', () => this.releaseResources());
+    }
+
+    // 释放资源的方法
+    releaseResources() {
+        // 清除所有计时器
+        if (this.timelineInterval) {
+            clearInterval(this.timelineInterval);
+            this.timelineInterval = null;
+        }
+        
+        if (this.cacheCleanupInterval) {
+            clearInterval(this.cacheCleanupInterval);
+            this.cacheCleanupInterval = null;
+        }
+        
+        // 停止所有音频播放
+        this.currentAudio.forEach(audio => {
+            if (audio) {
+                audio.pause();
+                audio.src = '';
+            }
+        });
+        this.currentAudio.clear();
+        
+        // 清空缓存
+        this.audioCache.forEach(audio => {
+            if (audio) {
+                audio.src = '';
+            }
+        });
+        this.audioCache.clear();
+        
+        console.log('音频混音器资源已释放');
     }
 
     // 显示加载指示器
@@ -202,16 +244,51 @@ class AudioMixer {
         }
     }
 
-    // 验证URL安全性
+    // 验证URL安全性，增强安全检查
     isValidAudioUrl(url) {
         try {
+            // 检查是否是合法URL
             const parsed = new URL(url);
-            // 只允许https协议和已知的音频域名
-            return (parsed.protocol === 'https:' && 
-                   (parsed.hostname === 'assets.mixkit.co' || 
-                    parsed.hostname.endsWith('.cloudfront.net')));
+            
+            // 只允许https协议 
+            if (parsed.protocol !== 'https:') {
+                console.error('URL协议不安全:', url);
+                return false;
+            }
+            
+            // 检查已知的安全音频域名
+            const allowedDomains = [
+                'assets.mixkit.co',
+                'cloudfront.net',
+                'amazonaws.com'
+            ];
+            
+            // 检查域名是否在白名单中
+            const isDomainAllowed = allowedDomains.some(domain => 
+                parsed.hostname === domain || 
+                parsed.hostname.endsWith('.' + domain)
+            );
+            
+            if (!isDomainAllowed) {
+                console.error('URL域名不在白名单中:', url);
+                return false;
+            }
+            
+            // 检查文件扩展名
+            const fileExtensions = ['.mp3', '.wav', '.ogg', '.m4a', '.aac'];
+            const hasValidExtension = fileExtensions.some(ext => 
+                parsed.pathname.toLowerCase().endsWith(ext)
+            );
+            
+            if (!hasValidExtension) {
+                console.warn('URL可能不是音频文件:', url);
+                // 允许没有扩展名的URL，因为有些服务可能不直接在URL中显示扩展名
+                // 但仍记录警告信息
+            }
+            
+            return true;
         } catch (e) {
-            console.error('URL格式无效:', url);
+            console.error('URL格式无效:', url, e.message);
             return false;
         }
     }
@@ -552,10 +629,12 @@ class AudioMixer {
                 const startTime = (startPosition - 1);
                 const duration = parseInt(trackItem.dataset.duration || 5);
                 
-                if (this.currentTime >= startTime && this.currentTime <= startTime + duration) {
+                // 检查当前时间是否在音频项的播放范围内
+                if (this.currentTime >= startTime && this.currentTime < startTime + duration) {
                     const url = trackItem.dataset.url;
                     const trackId = track.id;
                     const elapsedTime = this.currentTime - startTime;
+                    const title = trackItem.dataset.title;
                     
                     // 加载并播放音频
                     this.preloadAudio(url).then(audio => {
@@ -566,14 +645,27 @@ class AudioMixer {
                         const trackVolume = this.trackVolumes[trackId] || 1;
                         audio.volume = this.masterVolume * trackVolume;
                         
+                        // 添加ended事件监听
+                        audio.onended = () => {
+                            this.currentAudio.delete(url);
+                        };
+                        
+                        // 添加错误处理
+                        audio.onerror = (e) => {
+                            this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
+                            this.currentAudio.delete(url);
+                        };
+                        
                         // 只有在非暂停状态下才播放音频
                         if (!this.isPaused) {
-                            audio.play();
+                            audio.play().catch(err => {
+                                this.handleAudioError(err, url, title);
+                            });
                         }
                         
                         this.currentAudio.set(url, audio);
                     }).catch(error => {
-                        this.showNotification(`无法播放音频: ${trackItem.dataset.title}`);
+                        this.handleAudioError(error, url, title);
                     });
                 }
             });
@@ -724,14 +816,29 @@ class AudioMixer {
     }
     
     // 优化音频缓存管理
-    MAX_CACHE_SIZE = 50; // 最大缓存数量
+    MAX_CACHE_SIZE = 30; // 减少最大缓存数量，避免内存泄漏
     
     // 添加到缓存，使用LRU策略 (Least Recently Used)
     addToCache(url, audio) {
         // 如果缓存已满，移除最早没使用的项
         if (this.audioCache.size >= this.MAX_CACHE_SIZE) {
-            const oldestKey = this.audioCache.keys().next().value;
-            this.audioCache.delete(oldestKey);
+            // 找出最早的项 - 确保不是正在播放的音频
+            const keys = Array.from(this.audioCache.keys());
+            for (const key of keys) {
+                if (!this.currentAudio.has(key)) {
+                    // 释放资源
+                    const oldAudio = this.audioCache.get(key);
+                    if (oldAudio) {
+                        oldAudio.pause();
+                        oldAudio.src = ''; // 释放媒体资源
+                        oldAudio.load(); // 强制释放
+                    }
+                    
+                    this.audioCache.delete(key);
+                    console.log(`缓存已满，释放资源: ${key}`);
+                    break;
+                }
+            }
         }
         
         // 添加新项到缓存
@@ -754,17 +861,42 @@ class AudioMixer {
         return audio;
     }
     
-    // 清理过期缓存
+    // 更积极地清理缓存
     cleanupCache() {
-        // 如果缓存超过阈值，清理一半
-        if (this.audioCache.size > this.MAX_CACHE_SIZE * 0.8) {
-            const keysToDelete = Math.floor(this.audioCache.size * 0.5);
+        console.log(`当前缓存大小: ${this.audioCache.size}, 当前播放: ${this.currentAudio.size}`);
+        
+        // 始终保留一些空闲缓存空间
+        const targetSize = Math.floor(this.MAX_CACHE_SIZE * 0.7);
+        
+        if (this.audioCache.size > targetSize) {
+            const keysToDelete = this.audioCache.size - targetSize;
             const keys = Array.from(this.audioCache.keys());
+            let deletedCount = 0;
             
-            for (let i = 0; i < keysToDelete && i < keys.length; i++) {
+            for (let i = 0; i < keys.length && deletedCount < keysToDelete; i++) {
                 // 检查是否在当前播放中
                 if (!this.currentAudio.has(keys[i])) {
+                    // 释放资源
+                    const oldAudio = this.audioCache.get(keys[i]);
+                    if (oldAudio) {
+                        oldAudio.pause();
+                        oldAudio.src = '';
+                        oldAudio.load();
+                    }
+                    
                     this.audioCache.delete(keys[i]);
+                    deletedCount++;
+                }
+            }
+            
+            console.log(`已清理 ${deletedCount} 个缓存项`);
+            
+            // 触发垃圾回收
+            if (window.gc) {
+                try {
+                    window.gc();
+                } catch (e) {
+                    console.log('无法直接调用垃圾回收');
                 }
             }
         }
@@ -787,9 +919,30 @@ class AudioMixer {
         `;
         trackItem.dataset.url = data.url;
         trackItem.dataset.title = safeTitle;
-        trackItem.dataset.duration = 5;
-        trackItem.style.gridColumnStart = position;
-        trackItem.style.gridColumnEnd = position + 5;
+        
+        // 先加载音频以确定正确的持续时间
+        this.preloadAudio(data.url)
+            .then(audio => {
+                const duration = audio.duration ? Math.ceil(audio.duration) : 5;
+                trackItem.dataset.duration = duration;
+                
+                // 根据实际音频长度设置网格长度，但不超过可用空间
+                const maxLength = 30 - position + 1;
+                const itemLength = Math.min(duration, maxLength);
+                
+                trackItem.style.gridColumnStart = position;
+                trackItem.style.gridColumnEnd = position + itemLength;
+                
+                // 在布局中更新视觉外观
+                this.reorganizeTrackItems(trackItem.closest('.track-lane'));
+            })
+            .catch(() => {
+                // 加载失败时使用默认长度
+                trackItem.dataset.duration = 5;
+                trackItem.style.gridColumnStart = position;
+                trackItem.style.gridColumnEnd = position + 5;
+            });
+            
         trackItem.style.gridRowStart = "1";
         trackItem.style.gridRowEnd = "2";
 
@@ -803,9 +956,8 @@ class AudioMixer {
         return temp.innerHTML;
     }
 
-    // 优化makeTrackItemDraggable方法，添加触摸支持
+    // 优化makeTrackItemDraggable方法，添加触摸支持和更好的视觉反馈
     makeTrackItemDraggable(trackItem, trackLane) {
-        // 仅处理轨道内移动，不再处理拖拽
         let isDragging = false;
         let startX, startLeft, gridSize;
         let lastValidPosition = 1;
@@ -835,6 +987,10 @@ class AudioMixer {
             
             // 添加正在拖动的样式
             trackItem.classList.add('dragging');
+            document.body.style.cursor = 'grabbing';
+            
+            // 显示辅助提示
+            this.showNotification('拖动以调整音频位置');
         };
         
         // 处理拖动中
@@ -853,14 +1009,22 @@ class AudioMixer {
             let newStart = startLeft + gridDelta;
             newStart = Math.max(1, Math.min(26, newStart));
 
+            // 检查新位置是否可用
             if (this.isPositionAvailable(trackLane, newStart, trackItem)) {
+                const duration = parseInt(trackItem.dataset.duration || 5);
                 trackItem.style.gridColumnStart = newStart;
-                trackItem.style.gridColumnEnd = newStart + 5;
+                trackItem.style.gridColumnEnd = newStart + duration;
                 lastValidPosition = newStart;
+                
+                // 更新视觉效果 - 有效位置时显示绿色边框
+                trackItem.style.borderColor = '#4CAF50';
             } else {
                 // 如果新位置不可用，保持最后一个有效位置
                 trackItem.style.gridColumnStart = lastValidPosition;
-                trackItem.style.gridColumnEnd = lastValidPosition + 5;
+                trackItem.style.gridColumnEnd = lastValidPosition + parseInt(trackItem.dataset.duration || 5);
+                
+                // 更新视觉效果 - 无效位置时显示红色边框
+                trackItem.style.borderColor = '#FF5252';
             }
         };
         
@@ -875,8 +1039,10 @@ class AudioMixer {
             document.removeEventListener('mouseup', handleDragEnd);
             document.removeEventListener('touchend', handleDragEnd);
             
-            // 移除拖动样式
+            // 恢复原样式
             trackItem.classList.remove('dragging');
+            trackItem.style.borderColor = '';
+            document.body.style.cursor = '';
             
             // 重新组织轨道项目
             this.reorganizeTrackItems(trackLane);
@@ -901,7 +1067,12 @@ class AudioMixer {
         this.trackQueue.push({...data, trackId: targetTrack.id});
 
         // 预加载音频
-        this.preloadAudio(data.url);
+        this.preloadAudio(data.url).catch(error => {
+            this.handleAudioError(error, data.url, data.title);
+        });
+        
+        // 使用防抖重组所有轨道
+        this.debouncedReorganize();
     }
 
     findAvailablePosition(track) {
@@ -931,25 +1102,78 @@ class AudioMixer {
         return null;
     }
 
-    // 确保isPositionAvailable方法正确定义
+    // 增强isPositionAvailable方法，考虑实际音频长度
     isPositionAvailable(trackLane, newStart, excludeItem) {
+        // 获取当前项目的长度
+        let itemDuration = 5;
+        if (excludeItem) {
+            itemDuration = parseInt(excludeItem.dataset.duration || 5);
+        }
+        
+        // 确保新位置不会超出时间轴边界
+        if (newStart < 1 || newStart + itemDuration > 31) {
+            return false;
+        }
+        
+        // 检查与其他项目的冲突
         const otherItems = Array.from(trackLane.querySelectorAll('.track-item'))
             .filter(item => item !== excludeItem);
 
         return !otherItems.some(item => {
             const itemStart = parseInt(item.style.gridColumnStart || 1);
-            const itemEnd = parseInt(item.style.gridColumnEnd || (itemStart + 5));
-            return newStart < itemEnd && (newStart + 5) > itemStart;
+            const itemEnd = parseInt(item.style.gridColumnEnd || (itemStart + parseInt(item.dataset.duration || 5)));
+            return newStart < itemEnd && (newStart + itemDuration) > itemStart;
         });
     }
 
-    // 确保reorganizeTrackItems方法正确定义
+    // 增强轨道项布局方法，处理长度不一致和潜在的重叠
     reorganizeTrackItems(trackLane) {
         const items = Array.from(trackLane.querySelectorAll('.track-item'));
+        if (items.length === 0) return;
+        
+        // 首先按开始位置排序
         items.sort((a, b) => {
             return parseInt(a.style.gridColumnStart) - parseInt(b.style.gridColumnStart);
         });
+        
+        // 检查并修复可能的重叠
+        for (let i = 1; i < items.length; i++) {
+            const currentItem = items[i];
+            const previousItem = items[i-1];
+            
+            const currentStart = parseInt(currentItem.style.gridColumnStart);
+            const previousEnd = parseInt(previousItem.style.gridColumnEnd);
+            
+            // 如果当前项目与前一个项目重叠
+            if (currentStart < previousEnd) {
+                // 尝试移动当前项目到前一个项目之后
+                const newStart = previousEnd;
+                const duration = parseInt(currentItem.dataset.duration || 5);
+                
+                // 检查新位置是否超出轨道边界
+                if (newStart + duration <= 31) {
+                    currentItem.style.gridColumnStart = newStart;
+                    currentItem.style.gridColumnEnd = newStart + duration;
+                } else {
+                    // 如果会超出边界，尝试调整持续时间
+                    const adjustedDuration = 31 - newStart;
+                    if (adjustedDuration > 0) {
+                        currentItem.style.gridColumnStart = newStart;
+                        currentItem.style.gridColumnEnd = 31;
+                        // 更新显示的时长
+                        currentItem.dataset.duration = adjustedDuration;
+                    } else {
+                        // 没有空间，移除此项目
+                        currentItem.remove();
+                        items.splice(i, 1);
+                        i--; // 调整索引
+                        this.showNotification('由于空间不足，部分音频片段被移除');
+                    }
+                }
+            }
+        }
 
+        // 设置正确的网格行
         items.forEach(item => {
             item.style.gridRowStart = "1";
             item.style.gridRowEnd = "2";
@@ -987,6 +1211,18 @@ class AudioMixer {
             this.updatePlayButtonIcon();
             this.playTrackSequence();
         }
+    }
+
+    // 添加继续播放的方法
+    continuePlayback() {
+        // 从当前时间点继续播放
+        this.isPaused = false;
+        
+        // 重新播放当前时间点的音频
+        this.checkTracksAtCurrentTime();
+        
+        // 重新启动时间线
+        this.startTimelineInterval();
     }
 
     // 确保pausePlayback方法正确定义
@@ -1038,7 +1274,7 @@ class AudioMixer {
             }
 
             this.updatePlaybackIndicator();
-            this.checkAndPlayTracks(timeInterval);
+            this.checkTracksAtCurrentTime();
         }, timeInterval * 1000);
     }
 
@@ -1063,45 +1299,56 @@ class AudioMixer {
         this.startTimelineInterval();
     }
 
-    // 确保checkAndPlayTracks方法正确定义
-    checkAndPlayTracks(timeInterval) {
-        document.querySelectorAll('.track-lane').forEach(track => {
-            track.querySelectorAll('.track-item').forEach(trackItem => {
-                const startPosition = parseInt(trackItem.style.gridColumnStart || 1);
-                const startTime = (startPosition - 1);
-                
-                // 改进：使用更精确的时间检测逻辑
-                if (this.currentTime >= startTime && this.currentTime < startTime + timeInterval) {
-                    this.playTrackItem(trackItem);
-                }
-            });
-        });
-    }
-
-    // 确保playTrackItem方法正确定义
+    // 修改 playTrackItem 方法，使用音频文件的实际长度并添加事件监听而不是setTimeout
     async playTrackItem(trackItem) {
         const url = trackItem.dataset.url;
         const trackId = trackItem.closest('.track-lane').id;
         const trackVolume = this.trackVolumes[trackId] || 1;
+        const title = trackItem.dataset.title;
         
-        this.preloadAudio(url).then(audio => {
+        try {
+            const audio = await this.preloadAudio(url);
             audio.currentTime = 0;
             
             // 设置音量 - 使用主音量和音轨音量的组合
             audio.volume = this.masterVolume * trackVolume;
             
-            audio.play();
-
-            const duration = 5; // 5秒固定时长
-            setTimeout(() => {
+            // 添加ended事件监听，而不是使用setTimeout
+            audio.onended = () => {
                 audio.pause();
                 audio.currentTime = 0;
-            }, duration * 1000);
+                this.currentAudio.delete(url);
+            };
+            
+            // 添加错误处理
+            audio.onerror = (e) => {
+                this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
+                this.currentAudio.delete(url);
+            };
+            
+            await audio.play();
+
+            // 使用音频的实际长度，而不是固定的5秒
+            const duration = audio.duration ? audio.duration : 5; // 如果获取不到时长，默认为5秒
+            
+            // 更新trackItem的持续时间数据（用于未来显示）
+            if (audio.duration && audio.duration !== 5) {
+                trackItem.dataset.duration = Math.ceil(audio.duration);
+                // 如果音频实际长度与轨道项显示长度不匹配，则更新轨道项长度
+                const currentEnd = parseInt(trackItem.style.gridColumnEnd);
+                const currentStart = parseInt(trackItem.style.gridColumnStart);
+                if (currentEnd - currentStart !== Math.ceil(audio.duration)) {
+                    const newLength = Math.min(Math.ceil(audio.duration), 30 - currentStart + 1);
+                    trackItem.style.gridColumnEnd = currentStart + newLength;
+                    // 更新后重新组织轨道项，确保没有重叠
+                    this.debouncedReorganize();
+                }
+            }
 
             this.currentAudio.set(url, audio);
-        }).catch(error => {
-            this.showNotification(`无法播放音频: ${trackItem.dataset.title}`);
-        });
+        } catch (error) {
+            this.handleAudioError(error, url, title);
+        }
     }
 
     // 确保updateAllAudioVolumes方法正确定义
@@ -1177,8 +1424,8 @@ class AudioMixer {
         }
         
         // 如果已缓存，从缓存返回
-        if (this.audioCache.has(url)) {
-            const cachedAudio = this.audioCache.get(url);
+        const cachedAudio = this.getFromCache(url);
+        if (cachedAudio) {
             this.currentAudio.set(url, cachedAudio);
             return cachedAudio;
         }
@@ -1203,7 +1450,7 @@ class AudioMixer {
                     
                     // 使用默认音频代替
                     const defaultAudio = new Audio('https://assets.mixkit.co/sfx/preview/mixkit-simple-countdown-922.mp3');
-                    this.audioCache.set(url, defaultAudio);
+                    this.addToCache(url, defaultAudio);
                     this.currentAudio.set(url, defaultAudio);
                     
                     defaultAudio.load();
@@ -1217,7 +1464,7 @@ class AudioMixer {
                 // 音频可以播放时
                 audio.oncanplaythrough = () => {
                     // 缓存音频
-                    this.audioCache.set(url, audio);
+                    this.addToCache(url, audio);
                     this.currentAudio.set(url, audio);
                     
                     // 隐藏加载指示器
@@ -1284,6 +1531,59 @@ class AudioMixer {
                 notification.remove();
             }
         }, 5000);
+    }
+
+    // 添加防抖函数工具
+    debounce(func, delay) {
+        let timerId;
+        return function(...args) {
+            clearTimeout(timerId);
+            timerId = setTimeout(() => func.apply(this, args), delay);
+        };
+    }
+    
+    // 添加所有轨道的重组方法
+    reorganizeAllTracks() {
+        document.querySelectorAll('.track-lane').forEach(lane => {
+            this.reorganizeTrackItems(lane);
+        });
+    }
+    
+    // 改进错误处理方法
+    handleAudioError(error, url, title) {
+        console.error('音频处理错误:', error);
+        
+        // 根据错误类型显示不同的提示
+        let message = '';
+        if (error.name === 'NotSupportedError') {
+            message = `不支持的音频格式: ${title}`;
+        } else if (error.name === 'NotAllowedError') {
+            message = '浏览器阻止了自动播放，请点击界面后再试';
+        } else if (error.name === 'AbortError') {
+            message = '音频加载被中断';
+        } else if (error.name === 'NetworkError' || error.message.includes('network')) {
+            message = '网络错误，请检查您的连接';
+        } else {
+            message = `无法播放音频: ${title}`;
+        }
+        
+        this.showErrorNotification(message);
+        
+        // 记录详细错误信息
+        const errorDetails = {
+            url: url,
+            title: title,
+            error: {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            },
+            time: new Date().toISOString()
+        };
+        
+        console.log('详细错误信息:', errorDetails);
+        
+        // 可以在这里添加错误上报逻辑
     }
 }
 
