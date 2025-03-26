@@ -160,24 +160,60 @@ class AudioMixer {
             }
         ];
         this.currentAudio = new Map(); // 使用Map存储音频对象
+        this.audioCache = new Map(); // 音频缓存，避免重复加载
         this.trackQueue = [];
         this.currentTime = 0;
         this.timelineInterval = null;
+        this.animationFrameId = null; // 新增animationFrame ID
         this.isPaused = false;
         this.masterVolume = 1;
         this.trackVolumes = {}; // 存储各个音轨的音量
         this.trackCount = 4; // 默认创建4条音轨
+        this.loadingCount = 0; // 跟踪正在加载的音频数量
         
         this.init();
     }
 
     init() {
+        // 设置加载指示器
+        this.loadingIndicator = document.getElementById('loadingIndicator');
+        
         this.calculateScrollbarWidth();
         this.initializeAudioGrid();
         this.initializeTimeAxis();
         this.initializeTracks();
         this.setupEventListeners();
         this.setupDragAndDrop();
+    }
+
+    // 显示加载指示器
+    showLoading() {
+        this.loadingCount++;
+        if (this.loadingCount === 1) {
+            this.loadingIndicator.style.display = 'flex';
+        }
+    }
+    
+    // 隐藏加载指示器
+    hideLoading() {
+        this.loadingCount = Math.max(0, this.loadingCount - 1);
+        if (this.loadingCount === 0) {
+            this.loadingIndicator.style.display = 'none';
+        }
+    }
+
+    // 验证URL安全性
+    isValidAudioUrl(url) {
+        try {
+            const parsed = new URL(url);
+            // 只允许https协议和已知的音频域名
+            return (parsed.protocol === 'https:' && 
+                   (parsed.hostname === 'assets.mixkit.co' || 
+                    parsed.hostname.endsWith('.cloudfront.net')));
+        } catch (e) {
+            console.error('URL格式无效:', url);
+            return false;
+        }
     }
 
     calculateScrollbarWidth() {
@@ -205,6 +241,9 @@ class AudioMixer {
         const audioGrid = document.getElementById('audioGrid');
         audioGrid.innerHTML = ''; // 清空现有内容
         
+        // 使用文档片段减少DOM操作
+        const fragment = document.createDocumentFragment();
+        
         this.audioCategories.forEach((category) => {
             // 创建分类容器
             const categoryDiv = document.createElement('div');
@@ -225,6 +264,12 @@ class AudioMixer {
             
             // 直接添加所有音频项目到容器
             category.items.forEach((item) => {
+                // 验证URL
+                if (!this.isValidAudioUrl(item.url)) {
+                    console.warn(`跳过不安全的URL: ${item.url}`);
+                    return;
+                }
+                
                 const div = document.createElement('div');
                 div.className = 'audio-item';
                 div.draggable = true;
@@ -232,19 +277,29 @@ class AudioMixer {
                 div.dataset.url = item.url;
                 div.dataset.title = item.title;
                 
-                div.addEventListener('dragstart', (e) => this.handleDragStart(e));
+                // 不再为每个元素单独添加事件，后面会使用事件委托
                 itemsContainer.appendChild(div);
             });
             
             categoryDiv.appendChild(itemsContainer);
+            fragment.appendChild(categoryDiv);
+        });
+        
+        // 一次性添加所有元素到DOM
+        audioGrid.appendChild(fragment);
+        
+        // 使用事件委托，为audioGrid添加单个点击事件处理程序
+        audioGrid.addEventListener('click', (e) => {
+            const categoryDiv = e.target.closest('.audio-category');
+            const audioItem = e.target.closest('.audio-item');
             
-            // 添加点击事件
-            categoryDiv.addEventListener('click', (e) => {
-                // 阻止事件传播到音频项目
-                if (e.target.closest('.audio-item') || e.target.classList.contains('audio-item')) {
-                    return;
-                }
-                
+            // 如果点击的是音频项
+            if (audioItem) {
+                return; // 不要展开/折叠分类
+            }
+            
+            // 如果点击的是分类
+            if (categoryDiv && !e.target.closest('.audio-item')) {
                 // 关闭所有其他分类
                 document.querySelectorAll('.audio-category').forEach(otherCategory => {
                     if (otherCategory !== categoryDiv && otherCategory.classList.contains('expanded')) {
@@ -254,10 +309,10 @@ class AudioMixer {
                 
                 // 切换当前分类的展开状态
                 categoryDiv.classList.toggle('expanded');
-            });
-            
-            audioGrid.appendChild(categoryDiv);
+            }
         });
+        
+        // 拖拽事件已移至setupDragAndDrop方法中处理
     }
 
     initializeTimeAxis() {
@@ -338,8 +393,239 @@ class AudioMixer {
             this.updateAllAudioVolumes();
         });
 
-        // 完整添加播放指示器拖动功能
+        // 添加播放指示器拖动功能
         this.setupPlaybackIndicatorDrag();
+    }
+
+    // 增强的播放指示器拖动功能，添加触摸支持
+    setupPlaybackIndicatorDrag() {
+        const indicator = document.getElementById('playbackIndicator');
+        const trackArea = document.getElementById('trackArea');
+        let isDragging = false;
+        
+        // 处理指针移动（鼠标或触摸）
+        const handlePointerMove = (e) => {
+            if (!isDragging) return;
+            // 移除所有过渡动画，确保拖动平滑
+            indicator.style.transition = 'none';
+            // 从事件中获取正确的客户端X坐标
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            this.updateIndicatorPosition(clientX);
+        };
+        
+        // 处理指针释放
+        const handlePointerUp = () => {
+            if (!isDragging) return;
+            isDragging = false;
+            
+            // 确保定时器停止
+            if (this.timelineInterval) {
+                clearInterval(this.timelineInterval);
+                this.timelineInterval = null;
+            }
+            
+            // 移除事件监听
+            document.removeEventListener('mousemove', handlePointerMove);
+            document.removeEventListener('touchmove', handlePointerMove);
+            document.removeEventListener('mouseup', handlePointerUp);
+            document.removeEventListener('touchend', handlePointerUp);
+        };
+        
+        // 处理指针按下事件
+        const handlePointerDown = (e) => {
+            isDragging = true;
+            
+            // 如果正在播放，暂停播放
+            if (!this.isPaused) {
+                this.pausePlayback();
+            }
+            
+            // 阻止事件冒泡和默认行为
+            e.preventDefault();
+            e.stopPropagation();
+            
+            // 添加移动和释放事件监听
+            document.addEventListener('mousemove', handlePointerMove);
+            document.addEventListener('touchmove', handlePointerMove, { passive: false });
+            document.addEventListener('mouseup', handlePointerUp);
+            document.addEventListener('touchend', handlePointerUp);
+            
+            // 立即根据点击位置更新指示器
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            this.updateIndicatorPosition(clientX);
+        };
+        
+        // 添加鼠标和触摸事件监听
+        indicator.addEventListener('mousedown', handlePointerDown);
+        indicator.addEventListener('touchstart', handlePointerDown, { passive: false });
+        
+        // 点击轨道区域任意位置也可以移动指示器
+        const handleTrackAreaClick = (e) => {
+            // 排除点击音频项目和播放指示器的情况
+            if (e.target.closest('.track-item') || e.target.closest('.playback-indicator')) {
+                return;
+            }
+            
+            // 如果正在播放，暂停播放
+            if (!this.isPaused) {
+                this.pausePlayback();
+            }
+            
+            // 更新指示器位置
+            indicator.style.transition = 'none';
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            this.updateIndicatorPosition(clientX);
+        };
+        
+        trackArea.addEventListener('click', handleTrackAreaClick);
+        trackArea.addEventListener('touchend', (e) => {
+            // 避免滑动后触发点击
+            if (!isDragging) {
+                handleTrackAreaClick(e);
+            }
+        });
+    }
+    
+    // 添加更新指示器位置的方法
+    updateIndicatorPosition(clientX) {
+        const trackArea = document.getElementById('trackArea');
+        const indicator = document.getElementById('playbackIndicator');
+        
+        // 获取轨道区域的边界
+        const trackRect = trackArea.getBoundingClientRect();
+        
+        // 获取计算后的样式以获取精确的padding值
+        const computedStyle = window.getComputedStyle(trackArea);
+        const leftPadding = parseFloat(computedStyle.paddingLeft);
+        const rightPadding = parseFloat(computedStyle.paddingRight);
+        const borderWidth = parseFloat(computedStyle.borderRightWidth) || 0;
+        
+        // 计算指示器在内容区域内的位置
+        const contentWidth = trackRect.width - leftPadding - rightPadding;
+        
+        // 计算相对于内容区域的x位置
+        let relativeX = clientX - trackRect.left - leftPadding;
+        
+        // 考虑指示器的实际视觉宽度（主体+把手）
+        const indicatorWidth = 4; // 指示器本身宽度
+        const handleWidth = 16; // 指示器把手的宽度
+        const handleOffset = 6; // 把手左偏移量
+        
+        // 计算指示器整体视觉右边界超出部分
+        const indicatorRightOverflow = Math.max(0, handleWidth - handleOffset - indicatorWidth);
+        
+        // 精确边界修正值计算 - 让指示器可以覆盖右边框
+        const screenWidth = window.innerWidth;
+        const baseBoundaryCorrection = borderWidth + 2; // 基础修正值包含边框宽度
+        const extraCorrection = screenWidth >= 2000 ? Math.ceil(screenWidth / 1000) : 0;
+        const boundaryCorrection = baseBoundaryCorrection + extraCorrection;
+        
+        // 确保不超出内容区域边界（考虑指示器宽度和右侧超出部分，并添加修正值）
+        // 修改计算方式，使指示器可以精确覆盖右边框
+        const maxRelativeX = contentWidth - indicatorWidth - indicatorRightOverflow + boundaryCorrection;
+        relativeX = Math.max(0, Math.min(relativeX, maxRelativeX));
+        
+        // 更新指示器位置
+        indicator.style.left = `${leftPadding + relativeX}px`;
+        
+        // 计算并更新当前时间
+        const maxTime = 30; // 总时长为30秒
+        this.currentTime = (relativeX / contentWidth) * maxTime;
+        
+        // 检查是否应该在新位置播放轨道
+        this.checkTracksAtCurrentTime();
+    }
+    
+    // 添加在新位置检查和播放轨道的方法
+    checkTracksAtCurrentTime() {
+        // 停止当前所有音频
+        this.currentAudio.forEach(audio => {
+            audio.pause();
+            audio.currentTime = 0;
+        });
+        this.currentAudio.clear();
+        
+        // 检查所有轨道项目，如果应该在当前时间播放则开始播放
+        document.querySelectorAll('.track-lane').forEach(track => {
+            track.querySelectorAll('.track-item').forEach(trackItem => {
+                const startPosition = parseInt(trackItem.style.gridColumnStart || 1);
+                const startTime = (startPosition - 1);
+                const duration = parseInt(trackItem.dataset.duration || 5);
+                
+                if (this.currentTime >= startTime && this.currentTime <= startTime + duration) {
+                    const url = trackItem.dataset.url;
+                    const trackId = track.id;
+                    const elapsedTime = this.currentTime - startTime;
+                    
+                    // 加载并播放音频
+                    this.preloadAudio(url).then(audio => {
+                        // 设置播放位置
+                        audio.currentTime = Math.min(elapsedTime, audio.duration);
+                        
+                        // 设置音量
+                        const trackVolume = this.trackVolumes[trackId] || 1;
+                        audio.volume = this.masterVolume * trackVolume;
+                        
+                        // 只有在非暂停状态下才播放音频
+                        if (!this.isPaused) {
+                            audio.play();
+                        }
+                        
+                        this.currentAudio.set(url, audio);
+                    }).catch(error => {
+                        this.showNotification(`无法播放音频: ${trackItem.dataset.title}`);
+                    });
+                }
+            });
+        });
+    }
+    
+    // 添加更新播放指示器的方法
+    updatePlaybackIndicator() {
+        const indicator = document.getElementById('playbackIndicator');
+        const trackArea = document.getElementById('trackArea');
+        
+        // 获取计算后的样式以获取精确的padding值
+        const computedStyle = window.getComputedStyle(trackArea);
+        const leftPadding = parseFloat(computedStyle.paddingLeft);
+        const rightPadding = parseFloat(computedStyle.paddingRight);
+        const borderWidth = parseFloat(computedStyle.borderRightWidth) || 0;
+        
+        // 内容区域宽度 = 总宽度 - 左padding - 右padding - 边框
+        const contentWidth = trackArea.offsetWidth - leftPadding - rightPadding - borderWidth;
+        
+        // 计算位置并确保不超出轨道区域
+        const maxTime = 30; // 最大时间（秒）
+        const normalizedTime = Math.min(this.currentTime, maxTime);
+        
+        // 计算指示器位置 - 只在内容区域内移动
+        const relativePosition = (normalizedTime / maxTime) * contentWidth;
+        
+        // 计算考虑左边距的位置
+        const position = leftPadding + relativePosition;
+        
+        // 考虑指示器的实际视觉宽度（主体+把手）
+        const indicatorWidth = 4; // 指示器本身宽度
+        const handleWidth = 16; // 指示器把手的宽度
+        const handleOffset = 6; // 把手左偏移量
+        
+        // 计算指示器整体视觉右边界（主体右边界 + 把手右侧超出部分）
+        const indicatorRightOverflow = Math.max(0, handleWidth - handleOffset - indicatorWidth);
+        
+        // 精确边界修正值计算 - 让指示器可以覆盖右边框
+        const screenWidth = window.innerWidth;
+        const baseBoundaryCorrection = borderWidth + 2; // 基础修正值包含边框宽度
+        const extraCorrection = screenWidth >= 2000 ? Math.ceil(screenWidth / 1000) : 0;
+        const boundaryCorrection = baseBoundaryCorrection + extraCorrection;
+        
+        // 最大位置应当确保整个指示器（包括把手）都在区域内
+        // 修改计算方式，使指示器可以精确覆盖右边框
+        const maxPosition = trackArea.offsetWidth - rightPadding - indicatorWidth - indicatorRightOverflow + boundaryCorrection;
+        const clampedPosition = Math.min(position, maxPosition);
+        
+        // 设置指示器位置，不使用transition
+        indicator.style.transition = 'none';
+        indicator.style.left = `${clampedPosition}px`;
     }
 
     // 更新主音量图标
@@ -358,44 +644,247 @@ class AudioMixer {
 
     setupDragAndDrop() {
         const trackArea = document.getElementById('trackArea');
+        const trackContainer = document.getElementById('trackContainer');
+        const audioGrid = document.getElementById('audioGrid');
         
+        // 确保音频项可以被正确拖拽
+        audioGrid.addEventListener('dragstart', (e) => {
+            const audioItem = e.target.closest('.audio-item');
+            if (audioItem) {
+                e.dataTransfer.setData('text/plain', JSON.stringify({
+                    url: audioItem.dataset.url,
+                    title: audioItem.dataset.title
+                }));
+                // 添加拖拽效果
+                e.dataTransfer.effectAllowed = 'copy';
+            }
+        });
+        
+        // 使用事件委托，为整个轨道区域添加拖拽事件
         trackArea.addEventListener('dragover', (e) => {
             e.preventDefault();
+            // 允许拖放
+            e.dataTransfer.dropEffect = 'copy';
             trackArea.style.backgroundColor = 'rgba(168, 164, 255, 0.05)';
         });
 
         trackArea.addEventListener('dragleave', () => {
             trackArea.style.backgroundColor = 'transparent';
         });
-
-        document.querySelectorAll('.track-lane').forEach(track => {
-            this.setupTrackDragAndDrop(track);
+        
+        // 使用事件委托处理所有轨道的拖拽事件
+        trackContainer.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            // 允许拖放
+            e.dataTransfer.dropEffect = 'copy';
+            const trackLane = e.target.closest('.track-lane');
+            if (trackLane) {
+                trackLane.style.backgroundColor = 'rgba(168, 164, 255, 0.1)';
+            }
+        });
+        
+        trackContainer.addEventListener('dragleave', (e) => {
+            const trackLane = e.target.closest('.track-lane');
+            if (trackLane) {
+                trackLane.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
+            }
+        });
+        
+        trackContainer.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const trackLane = e.target.closest('.track-lane');
+            if (trackLane) {
+                trackLane.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
+                try {
+                    const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+                    // 确保数据有效
+                    if (data && data.url && data.title) {
+                        this.addTrackToTimeline(data, trackLane);
+                    } else {
+                        this.showErrorNotification('无效的音频数据');
+                    }
+                } catch (err) {
+                    console.error('拖放数据解析错误:', err);
+                    this.showErrorNotification('音频数据解析失败');
+                }
+            }
+        });
+        
+        // 使用事件委托处理轨道项目的点击操作
+        trackContainer.addEventListener('click', (e) => {
+            // 处理删除按钮点击
+            const removeBtn = e.target.closest('.remove-btn');
+            if (removeBtn) {
+                const trackItem = removeBtn.closest('.track-item');
+                if (trackItem) {
+                    this.removeTrack(trackItem);
+                }
+            }
         });
     }
+    
+    // 优化音频缓存管理
+    MAX_CACHE_SIZE = 50; // 最大缓存数量
+    
+    // 添加到缓存，使用LRU策略 (Least Recently Used)
+    addToCache(url, audio) {
+        // 如果缓存已满，移除最早没使用的项
+        if (this.audioCache.size >= this.MAX_CACHE_SIZE) {
+            const oldestKey = this.audioCache.keys().next().value;
+            this.audioCache.delete(oldestKey);
+        }
+        
+        // 添加新项到缓存
+        this.audioCache.set(url, audio);
+    }
+    
+    // 从缓存获取，并更新使用顺序
+    getFromCache(url) {
+        if (!this.audioCache.has(url)) {
+            return null;
+        }
+        
+        // 获取音频
+        const audio = this.audioCache.get(url);
+        
+        // 更新LRU顺序（删除后重新添加到最后）
+        this.audioCache.delete(url);
+        this.audioCache.set(url, audio);
+        
+        return audio;
+    }
+    
+    // 清理过期缓存
+    cleanupCache() {
+        // 如果缓存超过阈值，清理一半
+        if (this.audioCache.size > this.MAX_CACHE_SIZE * 0.8) {
+            const keysToDelete = Math.floor(this.audioCache.size * 0.5);
+            const keys = Array.from(this.audioCache.keys());
+            
+            for (let i = 0; i < keysToDelete && i < keys.length; i++) {
+                // 检查是否在当前播放中
+                if (!this.currentAudio.has(keys[i])) {
+                    this.audioCache.delete(keys[i]);
+                }
+            }
+        }
+    }
+    
+    // 替换createTrackItem方法，提高安全性和效率
+    createTrackItem(data, position) {
+        // 过滤HTML，避免XSS攻击
+        const safeTitle = this.sanitizeHTML(data.title);
+        
+        const trackItem = document.createElement('div');
+        trackItem.className = 'track-item';
+        trackItem.innerHTML = `
+            <span style="min-width: 80px">${safeTitle}</span>
+            <div class="track-controls">
+                <button class="remove-btn" title="删除">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        `;
+        trackItem.dataset.url = data.url;
+        trackItem.dataset.title = safeTitle;
+        trackItem.dataset.duration = 5;
+        trackItem.style.gridColumnStart = position;
+        trackItem.style.gridColumnEnd = position + 5;
+        trackItem.style.gridRowStart = "1";
+        trackItem.style.gridRowEnd = "2";
 
-    setupTrackDragAndDrop(track) {
-        track.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            track.style.backgroundColor = 'rgba(168, 164, 255, 0.1)';
-        });
-
-        track.addEventListener('dragleave', () => {
-            track.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
-        });
-
-        track.addEventListener('drop', (e) => {
-            e.preventDefault();
-            track.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
-            const data = JSON.parse(e.dataTransfer.getData('text/plain'));
-            this.addTrackToTimeline(data, track);
-        });
+        return trackItem;
+    }
+    
+    // 添加简单的HTML净化方法
+    sanitizeHTML(str) {
+        const temp = document.createElement('div');
+        temp.textContent = str;
+        return temp.innerHTML;
     }
 
-    handleDragStart(e) {
-        e.dataTransfer.setData('text/plain', JSON.stringify({
-            url: e.target.dataset.url,
-            title: e.target.dataset.title
-        }));
+    // 优化makeTrackItemDraggable方法，添加触摸支持
+    makeTrackItemDraggable(trackItem, trackLane) {
+        // 仅处理轨道内移动，不再处理拖拽
+        let isDragging = false;
+        let startX, startLeft, gridSize;
+        let lastValidPosition = 1;
+        
+        // 处理开始拖动
+        const handleTrackItemDrag = (e) => {
+            // 如果是删除按钮或拖拽事件，不处理
+            if (e.target.closest('.remove-btn')) {
+                return;
+            }
+
+            isDragging = true;
+            startX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            const rect = trackLane.getBoundingClientRect();
+            gridSize = rect.width / 30;
+            startLeft = parseInt(trackItem.style.gridColumnStart || 1);
+            lastValidPosition = startLeft;
+
+            // 添加移动和结束事件
+            document.addEventListener('mousemove', handleDragMove);
+            document.addEventListener('touchmove', handleDragMove, { passive: false });
+            document.addEventListener('mouseup', handleDragEnd);
+            document.addEventListener('touchend', handleDragEnd);
+            
+            // 阻止事件默认行为，避免其他拖放冲突
+            e.preventDefault();
+            
+            // 添加正在拖动的样式
+            trackItem.classList.add('dragging');
+        };
+        
+        // 处理拖动中
+        const handleDragMove = (e) => {
+            if (!isDragging) return;
+            
+            // 获取事件对应的坐标
+            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            
+            // 阻止页面滚动（对触摸事件）
+            if (e.touches) e.preventDefault();
+            
+            // 计算新位置
+            const deltaX = clientX - startX;
+            const gridDelta = Math.round(deltaX / gridSize);
+            let newStart = startLeft + gridDelta;
+            newStart = Math.max(1, Math.min(26, newStart));
+
+            if (this.isPositionAvailable(trackLane, newStart, trackItem)) {
+                trackItem.style.gridColumnStart = newStart;
+                trackItem.style.gridColumnEnd = newStart + 5;
+                lastValidPosition = newStart;
+            } else {
+                // 如果新位置不可用，保持最后一个有效位置
+                trackItem.style.gridColumnStart = lastValidPosition;
+                trackItem.style.gridColumnEnd = lastValidPosition + 5;
+            }
+        };
+        
+        // 处理拖动结束
+        const handleDragEnd = () => {
+            if (!isDragging) return;
+            isDragging = false;
+            
+            // 移除事件监听
+            document.removeEventListener('mousemove', handleDragMove);
+            document.removeEventListener('touchmove', handleDragMove);
+            document.removeEventListener('mouseup', handleDragEnd);
+            document.removeEventListener('touchend', handleDragEnd);
+            
+            // 移除拖动样式
+            trackItem.classList.remove('dragging');
+            
+            // 重新组织轨道项目
+            this.reorganizeTrackItems(trackLane);
+        };
+        
+        // 添加鼠标和触摸事件监听
+        trackItem.addEventListener('mousedown', handleTrackItemDrag);
+        trackItem.addEventListener('touchstart', handleTrackItemDrag, { passive: false });
     }
 
     addTrackToTimeline(data, targetTrack) {
@@ -440,288 +929,6 @@ class AudioMixer {
         }
 
         return null;
-    }
-
-    createTrackItem(data, position) {
-        const trackItem = document.createElement('div');
-        trackItem.className = 'track-item';
-        trackItem.innerHTML = `
-            <span style="min-width: 80px">${data.title}</span>
-            <div class="track-controls">
-                <button class="remove-btn" title="删除">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-        `;
-        trackItem.dataset.url = data.url;
-        trackItem.dataset.duration = 5;
-        trackItem.style.gridColumnStart = position;
-        trackItem.style.gridColumnEnd = position + 5;
-        trackItem.style.gridRowStart = "1";
-        trackItem.style.gridRowEnd = "2";
-
-        // 设置删除按钮
-        const removeBtn = trackItem.querySelector('.remove-btn');
-        removeBtn.addEventListener('click', () => this.removeTrack(trackItem));
-
-        return trackItem;
-    }
-
-    makeTrackItemDraggable(trackItem, trackLane) {
-        let isDragging = false;
-        let startX, startLeft, gridSize;
-        let lastValidPosition = 1;
-
-        const onMouseDown = (e) => {
-            if (e.target.classList.contains('remove-btn') || 
-                e.target.closest('.remove-btn')) {
-                return;
-            }
-
-            isDragging = true;
-            startX = e.clientX;
-            const rect = trackLane.getBoundingClientRect();
-            gridSize = rect.width / 30;
-            startLeft = parseInt(trackItem.style.gridColumnStart || 1);
-            lastValidPosition = startLeft;
-
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-            e.preventDefault();
-        };
-
-        const onMouseMove = (e) => {
-            if (!isDragging) return;
-
-            // 移除防抖，提高拖动体验
-            const deltaX = e.clientX - startX;
-            const gridDelta = Math.round(deltaX / gridSize);
-            let newStart = startLeft + gridDelta;
-            newStart = Math.max(1, Math.min(26, newStart));
-
-            if (this.isPositionAvailable(trackLane, newStart, trackItem)) {
-                trackItem.style.gridColumnStart = newStart;
-                trackItem.style.gridColumnEnd = newStart + 5;
-                lastValidPosition = newStart;
-            } else {
-                // 如果新位置不可用，保持最后一个有效位置
-                trackItem.style.gridColumnStart = lastValidPosition;
-                trackItem.style.gridColumnEnd = lastValidPosition + 5;
-            }
-        };
-
-        const onMouseUp = () => {
-            if (!isDragging) return;
-            isDragging = false;
-            document.removeEventListener('mousemove', onMouseMove);
-            document.removeEventListener('mouseup', onMouseUp);
-            this.reorganizeTrackItems(trackLane);
-        };
-
-        trackItem.addEventListener('mousedown', onMouseDown);
-    }
-
-    /* 完整添加播放指示器拖动功能 */
-    setupPlaybackIndicatorDrag() {
-        const indicator = document.getElementById('playbackIndicator');
-        const trackArea = document.getElementById('trackArea');
-        let isDragging = false;
-        let wasPaused = false;
-        
-        // 处理鼠标移动
-        const handleMouseMove = (e) => {
-            if (!isDragging) return;
-            // 移除所有过渡动画，确保拖动平滑
-            indicator.style.transition = 'none';
-            this.updateIndicatorPosition(e.clientX);
-        };
-        
-        // 处理鼠标释放
-        const handleMouseUp = () => {
-            if (!isDragging) return;
-            isDragging = false;
-            
-            // 修复：拖动后不自动播放，保持暂停状态
-            // 确保定时器停止
-            if (this.timelineInterval) {
-                clearInterval(this.timelineInterval);
-                this.timelineInterval = null;
-            }
-            
-            // 移除事件监听
-            document.removeEventListener('mousemove', handleMouseMove);
-            document.removeEventListener('mouseup', handleMouseUp);
-        };
-        
-        // 按下鼠标
-        indicator.addEventListener('mousedown', (e) => {
-            isDragging = true;
-            wasPaused = this.isPaused; // 记录当前是否暂停状态
-            
-            // 如果正在播放，暂停播放
-            if (!this.isPaused) {
-                this.pausePlayback();
-            }
-            
-            // 阻止事件冒泡和默认行为
-            e.preventDefault();
-            e.stopPropagation();
-            
-            // 添加移动和释放事件监听
-            document.addEventListener('mousemove', handleMouseMove);
-            document.addEventListener('mouseup', handleMouseUp);
-            
-            // 立即根据点击位置更新指示器
-            this.updateIndicatorPosition(e.clientX);
-        });
-        
-        // 点击轨道区域任意位置也可以移动指示器
-        trackArea.addEventListener('click', (e) => {
-            // 排除点击音频项目和播放指示器的情况
-            if (e.target.closest('.track-item') || e.target.closest('.playback-indicator')) {
-                return;
-            }
-            
-            // 记录当前状态
-            const wasPaused = this.isPaused;
-            
-            // 如果正在播放，暂停播放
-            if (!wasPaused) {
-                this.pausePlayback();
-            }
-            
-            // 更新指示器位置
-            indicator.style.transition = 'none';
-            this.updateIndicatorPosition(e.clientX);
-            
-            // 修复：点击区域后也不自动播放
-            // 保持暂停状态
-        });
-    }
-    
-    // 修改continuePlayback方法，确保从当前位置开始播放
-    continuePlayback() {
-        this.isPaused = false;
-        this.updatePlayButtonIcon();
-        
-        // 停止当前所有音频
-        this.currentAudio.forEach(audio => {
-            audio.pause();
-        });
-        this.currentAudio.clear();
-        
-        // 从当前时间点开始检查并播放轨道
-        this.checkTracksAtCurrentTime();
-        
-        // 重新启动时间线定时器，从当前时间点开始
-        this.startTimelineInterval();
-    }
-
-    /* 添加更新指示器位置的方法 */
-    updateIndicatorPosition(clientX) {
-        const trackArea = document.getElementById('trackArea');
-        const indicator = document.getElementById('playbackIndicator');
-        
-        // 获取轨道区域的边界
-        const trackRect = trackArea.getBoundingClientRect();
-        
-        // 获取计算后的样式以获取精确的padding值
-        const computedStyle = window.getComputedStyle(trackArea);
-        const leftPadding = parseFloat(computedStyle.paddingLeft);
-        const rightPadding = parseFloat(computedStyle.paddingRight);
-        
-        // 计算指示器在内容区域内的位置
-        const contentWidth = trackRect.width - leftPadding - rightPadding;
-        
-        // 计算相对于内容区域的x位置
-        let relativeX = clientX - trackRect.left - leftPadding;
-        
-        // 确保不超出内容区域边界
-        relativeX = Math.max(0, Math.min(relativeX, contentWidth));
-        
-        // 更新指示器位置
-        indicator.style.left = `${leftPadding + relativeX}px`;
-        
-        // 计算并更新当前时间
-        const maxTime = 30; // 总时长为30秒
-        this.currentTime = (relativeX / contentWidth) * maxTime;
-        
-        // 检查是否应该在新位置播放轨道
-        this.checkTracksAtCurrentTime();
-    }
-
-    /* 添加在新位置检查和播放轨道的方法 */
-    checkTracksAtCurrentTime() {
-        // 停止当前所有音频
-        this.currentAudio.forEach(audio => {
-            audio.pause();
-            audio.currentTime = 0;
-        });
-        this.currentAudio.clear();
-        
-        // 检查所有轨道项目，如果应该在当前时间播放则开始播放
-        document.querySelectorAll('.track-lane').forEach(track => {
-            track.querySelectorAll('.track-item').forEach(trackItem => {
-                const startPosition = parseInt(trackItem.style.gridColumnStart || 1);
-                const startTime = (startPosition - 1);
-                const duration = parseInt(trackItem.dataset.duration || 5);
-                
-                if (this.currentTime >= startTime && this.currentTime <= startTime + duration) {
-                    const url = trackItem.dataset.url;
-                    const trackId = track.id;
-                    const elapsedTime = this.currentTime - startTime;
-                    
-                    // 加载并播放音频
-                    this.preloadAudio(url).then(audio => {
-                        // 设置播放位置
-                        audio.currentTime = Math.min(elapsedTime, audio.duration);
-                        
-                        // 设置音量
-                        const trackVolume = this.trackVolumes[trackId] || 1;
-                        audio.volume = this.masterVolume * trackVolume;
-                        
-                        // 修改：只有在非暂停状态下才播放音频
-                        if (!this.isPaused) {
-                            audio.play();
-                        }
-                        
-                        this.currentAudio.set(url, audio);
-                    }).catch(error => {
-                        this.showNotification(`无法播放音频: ${trackItem.dataset.title}`);
-                    });
-                }
-            });
-        });
-    }
-
-    updatePlaybackIndicator() {
-        const indicator = document.getElementById('playbackIndicator');
-        const trackArea = document.getElementById('trackArea');
-        
-        // 获取计算后的样式以获取精确的padding值
-        const computedStyle = window.getComputedStyle(trackArea);
-        const leftPadding = parseFloat(computedStyle.paddingLeft);
-        const rightPadding = parseFloat(computedStyle.paddingRight);
-        
-        // 内容区域宽度 = 总宽度 - 左padding - 右padding
-        const contentWidth = trackArea.offsetWidth - leftPadding - rightPadding;
-        
-        // 计算位置并确保不超出轨道区域
-        const maxTime = 30; // 最大时间（秒）
-        const normalizedTime = Math.min(this.currentTime, maxTime);
-        
-        // 计算指示器位置 - 只在内容区域内移动
-        const relativePosition = (normalizedTime / maxTime) * contentWidth;
-        const position = leftPadding + relativePosition;
-        
-        // 指示器不应超过内容区域右边界
-        const indicatorWidth = 4; // 指示器本身宽度
-        const maxPosition = trackArea.offsetWidth - rightPadding - indicatorWidth;
-        const clampedPosition = Math.min(position, maxPosition);
-        
-        // 设置指示器位置，不使用transition
-        indicator.style.transition = 'none';
-        indicator.style.left = `${clampedPosition}px`;
     }
 
     // 确保isPositionAvailable方法正确定义
@@ -956,38 +1163,127 @@ class AudioMixer {
         }, 2000);
     }
 
-    // 修复preloadAudio方法
+    // 改进音频预加载方法
     async preloadAudio(url) {
+        // 首先进行URL安全检查
+        if (!this.isValidAudioUrl(url)) {
+            this.showErrorNotification(`不安全的音频URL: ${url}`);
+            return Promise.reject(new Error('不安全的音频URL'));
+        }
+    
+        // 如果当前正在播放，直接返回
         if (this.currentAudio.has(url)) {
             return this.currentAudio.get(url);
         }
+        
+        // 如果已缓存，从缓存返回
+        if (this.audioCache.has(url)) {
+            const cachedAudio = this.audioCache.get(url);
+            this.currentAudio.set(url, cachedAudio);
+            return cachedAudio;
+        }
 
         try {
+            // 显示加载指示器
+            this.showLoading();
+            
             // 使用Promise包装audio的加载过程
             return new Promise((resolve, reject) => {
                 const audio = new Audio();
                 
-                // 添加错误处理
-                audio.onerror = () => {
-                    console.warn(`音频 ${url} 加载失败，使用默认音频替代`);
+                // 添加丰富的错误处理
+                audio.onerror = (e) => {
+                    // 记录详细错误信息
+                    const errorCode = audio.error ? audio.error.code : '未知';
+                    const errorMessage = this.getAudioErrorMessage(errorCode);
+                    console.error(`音频加载失败: ${url}, 错误代码: ${errorCode}, 错误信息: ${errorMessage}`);
+                    
+                    // 显示错误通知
+                    this.showErrorNotification(`音频 ${url.split('/').pop()} 加载失败: ${errorMessage}`);
+                    
+                    // 使用默认音频代替
                     const defaultAudio = new Audio('https://assets.mixkit.co/sfx/preview/mixkit-simple-countdown-922.mp3');
+                    this.audioCache.set(url, defaultAudio);
                     this.currentAudio.set(url, defaultAudio);
+                    
                     defaultAudio.load();
+                    
+                    // 隐藏加载指示器
+                    this.hideLoading();
+                    
                     resolve(defaultAudio);
                 };
                 
+                // 音频可以播放时
                 audio.oncanplaythrough = () => {
+                    // 缓存音频
+                    this.audioCache.set(url, audio);
                     this.currentAudio.set(url, audio);
+                    
+                    // 隐藏加载指示器
+                    this.hideLoading();
+                    
                     resolve(audio);
                 };
                 
+                // 设置URL并加载
                 audio.src = url;
                 audio.load();
+                
+                // 设置加载超时
+                setTimeout(() => {
+                    if (!audio.readyState) {
+                        audio.onerror(new ErrorEvent('timeout'));
+                    }
+                }, 10000); // 10秒超时
             });
         } catch (error) {
-            this.showNotification(`音频加载失败: ${url}`);
+            // 隐藏加载指示器
+            this.hideLoading();
+            
+            this.showErrorNotification(`音频加载异常: ${error.message}`);
+            console.error('音频加载异常:', error);
             throw error;
         }
+    }
+    
+    // 获取音频错误信息
+    getAudioErrorMessage(errorCode) {
+        switch (errorCode) {
+            case 1: return '加载过程被中止';
+            case 2: return '网络错误';
+            case 3: return '解码失败';
+            case 4: return '格式不支持';
+            default: return '未知错误';
+        }
+    }
+    
+    // 显示错误通知
+    showErrorNotification(message) {
+        // 创建通知元素
+        const notification = document.createElement('div');
+        notification.className = 'notification error-message';
+        notification.innerHTML = `
+            <i class="fas fa-exclamation-circle"></i>
+            ${message}
+            <button class="close-btn">
+                <i class="fas fa-times"></i>
+            </button>
+        `;
+        document.body.appendChild(notification);
+
+        // 添加关闭按钮功能
+        const closeBtn = notification.querySelector('.close-btn');
+        closeBtn.addEventListener('click', () => {
+            notification.remove();
+        });
+
+        // 5秒后自动移除
+        setTimeout(() => {
+            if (document.body.contains(notification)) {
+                notification.remove();
+            }
+        }, 5000);
     }
 }
 

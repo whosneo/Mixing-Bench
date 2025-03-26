@@ -2,7 +2,11 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Mixing Bench</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Mixing Bench - 一个专业的在线音频混音工具，帮助您轻松创建和混合音频项目">
+    <meta name="keywords" content="音频混音,音乐制作,混音工具,在线混音">
+    <meta name="author" content="Mixing Bench团队">
+    <title>Mixing Bench - 专业音频混音工具</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -35,6 +39,12 @@
                 <div class="track-lane" data-track-name="音轨 4" id="track4"></div>
             </div>
             <div class="playback-indicator" id="playbackIndicator"></div>
+        </div>
+        
+        <!-- 添加加载状态指示器 -->
+        <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+            <div class="spinner"></div>
+            <div class="loading-text">正在加载音频资源...</div>
         </div>
     </div>
 
