@@ -171,6 +171,13 @@ class AudioMixer {
         this.trackCount = 4; // 默认创建4条音轨
         this.loadingCount = 0; // 跟踪正在加载的音频数量
         
+        // 添加操作标识符，用于防止过时操作影响状态
+        this.operationCounter = 0;
+        this.activeOperations = new Map(); // 跟踪活跃的音频操作
+        
+        // 音频缓存大小限制
+        this.MAX_CACHE_SIZE = 30; // 减少最大缓存数量，避免内存泄漏
+        
         // 设置定期清理缓存的计时器
         this.cacheCleanupInterval = setInterval(() => this.cleanupCache(), 60000); // 每分钟清理一次
         
@@ -180,6 +187,8 @@ class AudioMixer {
         // 初始化通知系统
         this.notifications = [];
         this.notificationContainer = null;
+        
+        this._justFinishedDragging = false;  // 初始化拖动完成标记
         
         this.init();
     }
@@ -635,6 +644,14 @@ class AudioMixer {
             if (!isDragging) return;
             isDragging = false;
             
+            // 设置刚完成拖动的标记，防止触发点击
+            this._justFinishedDragging = true;
+            
+            // 短暂延时后重置标记
+            setTimeout(() => {
+                this._justFinishedDragging = false;
+            }, 50);
+            
             // 确保定时器停止
             if (this.timelineInterval) {
                 clearInterval(this.timelineInterval);
@@ -695,15 +712,39 @@ class AudioMixer {
             
             // 更新指示器位置
             indicator.style.transition = 'none';
-            const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+            // 优化触摸事件坐标获取，同时处理touches和changedTouches
+            const clientX = e.clientX || 
+                (e.touches && e.touches[0] ? e.touches[0].clientX : 
+                (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : 0));
             this.updateIndicatorPosition(clientX);
         };
         
         trackArea.addEventListener('click', handleTrackAreaClick);
+        
+        // 触摸相关变量
+        let touchStartX = 0;
+        let touchStartTime = 0;
+        
+        // 添加触摸开始事件监听，记录开始位置
+        trackArea.addEventListener('touchstart', (e) => {
+            if (!e.target.closest('.track-item') && !e.target.closest('.playback-indicator') && !isDragging) {
+                touchStartX = e.touches[0].clientX;
+                touchStartTime = Date.now();
+            }
+        }, { passive: true });
+        
         trackArea.addEventListener('touchend', (e) => {
             // 避免滑动后触发点击，以及拖动操作后的点击
             if (!isDragging && !this._justFinishedDragging) {
-                handleTrackAreaClick(e);
+                // 计算触摸滑动距离和持续时间
+                const touchEndX = e.changedTouches[0].clientX;
+                const touchDuration = Date.now() - touchStartTime;
+                const touchDistance = Math.abs(touchEndX - touchStartX);
+                
+                // 仅当滑动距离小且时间短时才视为点击
+                if (touchDistance < 10 && touchDuration < 300) {
+                    handleTrackAreaClick(e);
+                }
             }
         });
     }
@@ -767,6 +808,17 @@ class AudioMixer {
         });
         this.currentAudio.clear();
         
+        // 获取当前操作的时间戳，用于跟踪哪些是新操作
+        const operationTimestamp = Date.now();
+        const operationId = ++this.operationCounter;
+        
+        // 清理过期的操作
+        for (const [key, op] of this.activeOperations.entries()) {
+            if (op.timestamp < operationTimestamp - 10000) { // 10秒前的操作视为过期
+                this.activeOperations.delete(key);
+            }
+        }
+        
         // 检查所有轨道项目，如果应该在当前时间播放则开始播放
         document.querySelectorAll('.track-lane').forEach(track => {
             track.querySelectorAll('.track-item').forEach(trackItem => {
@@ -781,8 +833,25 @@ class AudioMixer {
                     const elapsedTime = this.currentTime - startTime;
                     const title = trackItem.dataset.title;
                     
+                    // 创建此次操作的唯一标识符
+                    const audioOperationId = `${url}_${operationId}`;
+                    
+                    // 记录此操作为活跃操作
+                    this.activeOperations.set(audioOperationId, {
+                        url,
+                        timestamp: operationTimestamp,
+                        trackId,
+                        isActive: true
+                    });
+                    
                     // 加载并播放音频
                     this.preloadAudio(url).then(audio => {
+                        // 如果操作已经不是活跃操作，则不处理
+                        if (!this.activeOperations.has(audioOperationId) || 
+                            !this.activeOperations.get(audioOperationId).isActive) {
+                            return;
+                        }
+                        
                         // 设置播放位置
                         audio.currentTime = Math.min(elapsedTime, audio.duration);
                         
@@ -790,26 +859,49 @@ class AudioMixer {
                         const trackVolume = this.trackVolumes[trackId] || 1;
                         audio.volume = this.masterVolume * trackVolume;
                         
+                        // 使用自定义属性标记这个音频对象
+                        audio._operationId = audioOperationId;
+                        audio._trackId = trackId;
+                        audio._url = url;
+                        
                         // 添加ended事件监听
                         audio.onended = () => {
-                            this.currentAudio.delete(url);
+                            // 只有当操作仍然是活跃的，才操作Map
+                            if (this.activeOperations.has(audioOperationId) && 
+                                this.activeOperations.get(audioOperationId).isActive) {
+                                this.currentAudio.delete(url);
+                                this.activeOperations.delete(audioOperationId);
+                            }
                         };
                         
                         // 添加错误处理
                         audio.onerror = (e) => {
-                            this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
-                            this.currentAudio.delete(url);
+                            if (this.activeOperations.has(audioOperationId) && 
+                                this.activeOperations.get(audioOperationId).isActive) {
+                                this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
+                                this.currentAudio.delete(url);
+                                this.activeOperations.delete(audioOperationId);
+                            }
                         };
                         
                         // 只有在非暂停状态下才播放音频
                         if (!this.isPaused) {
                             audio.play().catch(err => {
-                                this.handleAudioError(err, url, title);
+                                if (this.activeOperations.has(audioOperationId) && 
+                                    this.activeOperations.get(audioOperationId).isActive) {
+                                    this.handleAudioError(err, url, title);
+                                    this.activeOperations.delete(audioOperationId);
+                                }
                             });
                         }
                         
+                        // 安全地更新Map
                         this.currentAudio.set(url, audio);
                     }).catch(error => {
+                        // 错误时也要清理操作状态
+                        if (this.activeOperations.has(audioOperationId)) {
+                            this.activeOperations.delete(audioOperationId);
+                        }
                         this.handleAudioError(error, url, title);
                     });
                 }
@@ -961,7 +1053,6 @@ class AudioMixer {
     }
     
     // 优化的音频缓存管理
-    MAX_CACHE_SIZE = 30; // 减少最大缓存数量，避免内存泄漏
     
     // 改进的缓存添加方法，使用LRU策略 (Least Recently Used)并防止重复添加
     addToCache(url, audio) {
@@ -1509,8 +1600,14 @@ class AudioMixer {
 
         // 批量应用更新
         if (hasUpdates) {
-            // 使用requestAnimationFrame优化视觉更新
-            requestAnimationFrame(() => {
+            // 取消之前的animationFrame，如果有的话
+            if (this.animationFrameId) {
+                cancelAnimationFrame(this.animationFrameId);
+                this.animationFrameId = null;
+            }
+            
+            // 使用requestAnimationFrame优化视觉更新，并保存返回的ID
+            this.animationFrameId = requestAnimationFrame(() => {
                 updates.forEach(update => {
                     if (update.remove) {
                         update.element.remove();
@@ -1522,6 +1619,8 @@ class AudioMixer {
                         }
                     }
                 });
+                // 完成后清空ID
+                this.animationFrameId = null;
             });
         }
 
@@ -1658,27 +1757,67 @@ class AudioMixer {
         const trackVolume = this.trackVolumes[trackId] || 1;
         const title = trackItem.dataset.title;
         
+        // 创建操作ID
+        const operationId = ++this.operationCounter;
+        const audioOperationId = `${url}_${operationId}`;
+        
+        // 记录此操作
+        this.activeOperations.set(audioOperationId, {
+            url,
+            timestamp: Date.now(),
+            trackId,
+            isActive: true
+        });
+        
         try {
             const audio = await this.preloadAudio(url);
+            
+            // 检查操作是否仍然有效
+            if (!this.activeOperations.has(audioOperationId) || 
+                !this.activeOperations.get(audioOperationId).isActive) {
+                return;
+            }
+            
             audio.currentTime = 0;
             
             // 设置音量 - 使用主音量和音轨音量的组合
             audio.volume = this.masterVolume * trackVolume;
             
+            // 使用自定义属性标记这个音频对象
+            audio._operationId = audioOperationId;
+            audio._trackId = trackId;
+            audio._url = url;
+            
             // 添加ended事件监听，而不是使用setTimeout
             audio.onended = () => {
-                audio.pause();
-                audio.currentTime = 0;
-                this.currentAudio.delete(url);
+                // 只有当操作仍然是活跃的，才操作Map
+                if (this.activeOperations.has(audioOperationId) && 
+                    this.activeOperations.get(audioOperationId).isActive) {
+                    audio.pause();
+                    audio.currentTime = 0;
+                    this.currentAudio.delete(url);
+                    this.activeOperations.delete(audioOperationId);
+                }
             };
             
             // 添加错误处理
             audio.onerror = (e) => {
-                this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
-                this.currentAudio.delete(url);
+                if (this.activeOperations.has(audioOperationId) && 
+                    this.activeOperations.get(audioOperationId).isActive) {
+                    this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
+                    this.currentAudio.delete(url);
+                    this.activeOperations.delete(audioOperationId);
+                }
             };
             
             await audio.play();
+
+            // 检查操作是否仍然有效
+            if (!this.activeOperations.has(audioOperationId) || 
+                !this.activeOperations.get(audioOperationId).isActive) {
+                audio.pause();
+                return;
+            }
 
             // 使用音频的实际长度，而不是固定的5秒
             const duration = audio.duration ? audio.duration : 5; // 如果获取不到时长，默认为5秒
@@ -1697,8 +1836,13 @@ class AudioMixer {
                 }
             }
 
+            // 安全地更新Map
             this.currentAudio.set(url, audio);
         } catch (error) {
+            // 错误时清理操作状态
+            if (this.activeOperations.has(audioOperationId)) {
+                this.activeOperations.delete(audioOperationId);
+            }
             this.handleAudioError(error, url, title);
         }
     }
@@ -1725,6 +1869,9 @@ class AudioMixer {
             clearInterval(this.timelineInterval);
             this.timelineInterval = null;
         }
+
+        // 先取消所有活跃操作
+        this.activeOperations.clear();
 
         // 停止并重置所有音频
         this.currentAudio.forEach(audio => {
@@ -1896,10 +2043,12 @@ class AudioMixer {
             return this.pendingAudioLoads.get(normalizedUrl);
         }
         
-        // 如果当前正在播放，直接返回
+        // 如果当前正在播放，创建一个新的引用（克隆）避免直接修改正在播放的音频
         if (this.currentAudio.has(normalizedUrl)) {
             console.log(`复用当前播放中的音频: ${normalizedUrl}`);
-            return this.currentAudio.get(normalizedUrl);
+            const playingAudio = this.currentAudio.get(normalizedUrl);
+            // 返回一个Promise，解析为当前播放的音频，但不影响当前播放状态
+            return Promise.resolve(playingAudio);
         }
         
         // 如果已缓存，从缓存返回（更新LRU顺序）
@@ -1914,9 +2063,6 @@ class AudioMixer {
             } else {
                 // 重置音频状态
                 cachedAudio.currentTime = 0;
-                
-                // 如果需要立即使用，添加到当前播放列表
-                this.currentAudio.set(normalizedUrl, cachedAudio);
                 return cachedAudio;
             }
         }
@@ -1977,7 +2123,6 @@ class AudioMixer {
                     
                     // 缓存音频
                     this.addToCache(normalizedUrl, audio);
-                    this.currentAudio.set(normalizedUrl, audio);
                     
                     // 隐藏加载指示器
                     this.hideLoading();
