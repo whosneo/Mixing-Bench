@@ -553,30 +553,30 @@ class AudioMixer {
             categoryDiv.className = 'audio-category';
             
             // 创建分类标题
-            const titleDiv = document.createElement('div');
-            titleDiv.className = 'audio-category-title';
-            
-            // 创建标题内容
-            const titleContent = document.createElement('span');
+            const categoryTitleDiv = document.createElement('div');
+            categoryTitleDiv.className = 'audio-category-title';
             
             // 创建图标
             const iconSpan = document.createElement('span');
             iconSpan.className = 'audio-category-icon';
-            iconSpan.textContent = category.icon;
-            titleContent.appendChild(iconSpan);
+            // 对图标进行安全处理，防止可能的注入
+            const safeIcon = this.sanitizeHTML(category.icon);
+            iconSpan.textContent = safeIcon;
+            categoryTitleDiv.appendChild(iconSpan);
             
-            // 添加标题文本
-            const titleText = document.createTextNode(` ${category.title}`);
-            titleContent.appendChild(titleText);
-            
-            titleDiv.appendChild(titleContent);
+            // 创建标题
+            const titleSpan = document.createElement('span');
+            // 对分类标题进行安全处理
+            const safeCategoryTitle = this.sanitizeHTML(category.title);
+            titleSpan.textContent = safeCategoryTitle;
+            categoryTitleDiv.appendChild(titleSpan);
             
             // 创建展开/折叠图标
             const toggleIcon = document.createElement('i');
             toggleIcon.className = 'fas fa-chevron-down audio-category-toggle';
-            titleDiv.appendChild(toggleIcon);
+            categoryTitleDiv.appendChild(toggleIcon);
             
-            categoryDiv.appendChild(titleDiv);
+            categoryDiv.appendChild(categoryTitleDiv);
             
             // 创建音频项目容器
             const itemsContainer = document.createElement('div');
@@ -597,12 +597,14 @@ class AudioMixer {
                 
                 // 创建标题文本
                 const titleSpan = document.createElement('span');
-                titleSpan.textContent = item.title;
+                // 对标题进行安全处理
+                const safeTitle = this.sanitizeHTML(item.title);
+                titleSpan.textContent = safeTitle;
                 div.appendChild(titleSpan);
                 
                 // 设置数据属性
                 div.dataset.url = item.url;
-                div.dataset.title = item.title;
+                div.dataset.title = safeTitle; // 保存安全处理后的标题
                 
                 itemsFragment.appendChild(div);
             });
@@ -1202,6 +1204,8 @@ class AudioMixer {
     addToCache(url, audio) {
         // 如果URL已在缓存中且是同一个音频对象，直接返回，避免重复操作
         if (this.audioCache.has(url) && this.audioCache.get(url) === audio) {
+            // 更新LRU顺序，将此项移动到"最近使用"位置
+            this.updateCacheOrder(url);
             return;
         }
         
@@ -1231,51 +1235,25 @@ class AudioMixer {
         
         // 检查缓存容量并根据需要清理
         if (this.audioCache.size >= this.MAX_CACHE_SIZE) {
-            let oldestKey = null;
-            let oldestAudio = null;
-            
-            // 使用双重循环策略：首先尝试删除非当前播放项，然后再考虑所有项
-            // 首先查找不在当前播放的项目
-            for (const [key, cachedAudio] of this.audioCache.entries()) {
-                if (!this.currentAudio.has(key)) {
-                    oldestKey = key;
-                    oldestAudio = cachedAudio;
-                    break;
-                }
-            }
-            
-            // 如果所有项都在播放中，则移除最旧的项（仅作为后备策略）
-            if (oldestKey === null) {
-                oldestKey = this.audioCache.keys().next().value;
-                oldestAudio = this.audioCache.get(oldestKey);
-            }
-            
-            // 如果找到要移除的项
-            if (oldestKey && oldestAudio) {
-                try {
-                    // 仅当不在当前播放列表中才释放资源
-                    if (!this.currentAudio.has(oldestKey) || this.currentAudio.get(oldestKey) !== oldestAudio) {
-                        oldestAudio.pause();
-                        oldestAudio.oncanplaythrough = null;
-                        oldestAudio.onerror = null;
-                        oldestAudio.onended = null;
-                        oldestAudio.onloadedmetadata = null;
-                        oldestAudio.onpause = null;
-                        oldestAudio.onplay = null;
-                        oldestAudio.src = '';
-                        oldestAudio.load();
-                    }
-                    
-                    this.audioCache.delete(oldestKey);
-                    console.log(`缓存已满，释放资源: ${oldestKey}`);
-                } catch (error) {
-                    console.error('释放缓存资源时出错:', error);
-                }
-            }
+            this.removeOldestCacheItem();
         }
         
         // 添加新项到缓存
         this.audioCache.set(url, audio);
+        
+        // 如果不存在缓存访问顺序数组，则创建一个
+        if (!this.cacheAccessOrder) {
+            this.cacheAccessOrder = [];
+        }
+        
+        // 将新添加的项添加到访问顺序数组的末尾（表示最近使用）
+        // 先确保没有重复
+        const existingIndex = this.cacheAccessOrder.indexOf(url);
+        if (existingIndex !== -1) {
+            this.cacheAccessOrder.splice(existingIndex, 1);
+        }
+        this.cacheAccessOrder.push(url);
+        
         console.log(`已添加到缓存: ${url}, 当前缓存大小: ${this.audioCache.size}`);
     }
     
@@ -1288,12 +1266,114 @@ class AudioMixer {
         // 获取音频
         const audio = this.audioCache.get(url);
         
-        // 更新LRU顺序 - 明确地将项移动到"最近使用"位置
-        this.audioCache.delete(url);
-        this.audioCache.set(url, audio);
+        // 更新LRU顺序
+        this.updateCacheOrder(url);
         
         console.log(`缓存命中: ${url}`);
         return audio;
+    }
+    
+    // 移除最旧的缓存项（真正的LRU实现）
+    removeOldestCacheItem() {
+        // 确保访问顺序数组存在
+        if (!this.cacheAccessOrder || this.cacheAccessOrder.length === 0) {
+            // 如果不存在或为空，则重建
+            this.rebuildCacheAccessOrder();
+            
+            // 如果仍然为空，则无法继续
+            if (this.cacheAccessOrder.length === 0) {
+                console.warn('无法确定最旧的缓存项，缓存可能已空');
+                return;
+            }
+        }
+        
+        // 从顺序数组的开始位置（最旧的项）开始检查
+        let oldestKeyIndex = 0;
+        let oldestKey = null;
+        
+        // 查找不在当前播放的最旧项
+        while (oldestKeyIndex < this.cacheAccessOrder.length) {
+            const key = this.cacheAccessOrder[oldestKeyIndex];
+            
+            // 跳过不存在于缓存中的键（可能已被删除）
+            if (!this.audioCache.has(key)) {
+                this.cacheAccessOrder.splice(oldestKeyIndex, 1);
+                continue;
+            }
+            
+            // 如果这个项目不在当前播放中，我们可以删除它
+            if (!this.currentAudio.has(key)) {
+                oldestKey = key;
+                break;
+            }
+            
+            // 否则检查下一个项目
+            oldestKeyIndex++;
+        }
+        
+        // 如果所有项都在播放中，则移除最旧的项（即使它在播放中）
+        if (oldestKey === null && this.cacheAccessOrder.length > 0) {
+            oldestKey = this.cacheAccessOrder[0];
+        }
+        
+        // 如果找到要移除的项
+        if (oldestKey) {
+            const oldestAudio = this.audioCache.get(oldestKey);
+            
+            try {
+                // 仅当不在当前播放列表中才释放资源
+                if (oldestAudio && (!this.currentAudio.has(oldestKey) || this.currentAudio.get(oldestKey) !== oldestAudio)) {
+                    oldestAudio.pause();
+                    oldestAudio.oncanplaythrough = null;
+                    oldestAudio.onerror = null;
+                    oldestAudio.onended = null;
+                    oldestAudio.onloadedmetadata = null;
+                    oldestAudio.onpause = null;
+                    oldestAudio.onplay = null;
+                    oldestAudio.src = '';
+                    oldestAudio.load();
+                }
+                
+                // 从缓存和访问顺序中移除
+                this.audioCache.delete(oldestKey);
+                const orderIndex = this.cacheAccessOrder.indexOf(oldestKey);
+                if (orderIndex !== -1) {
+                    this.cacheAccessOrder.splice(orderIndex, 1);
+                }
+                
+                console.log(`缓存已满，释放资源: ${oldestKey}`);
+            } catch (error) {
+                console.error('释放缓存资源时出错:', error);
+                
+                // 即使出错，也从缓存中移除，避免不可用的资源占用缓存位置
+                this.audioCache.delete(oldestKey);
+                const orderIndex = this.cacheAccessOrder.indexOf(oldestKey);
+                if (orderIndex !== -1) {
+                    this.cacheAccessOrder.splice(orderIndex, 1);
+                }
+            }
+        }
+    }
+    
+    // 更新缓存项的LRU顺序
+    updateCacheOrder(url) {
+        // 确保访问顺序数组存在
+        if (!this.cacheAccessOrder) {
+            this.cacheAccessOrder = [];
+        }
+        
+        // 从访问顺序中移除此URL（如果存在），然后添加到末尾（表示最近使用）
+        const index = this.cacheAccessOrder.indexOf(url);
+        if (index !== -1) {
+            this.cacheAccessOrder.splice(index, 1);
+        }
+        this.cacheAccessOrder.push(url);
+    }
+    
+    // 重建缓存访问顺序数组
+    rebuildCacheAccessOrder() {
+        // 创建一个新的访问顺序数组，包含当前缓存中的所有键
+        this.cacheAccessOrder = Array.from(this.audioCache.keys());
     }
     
     // 更积极地清理缓存
@@ -1310,38 +1390,19 @@ class AudioMixer {
         
         if (this.audioCache.size > targetSize) {
             const keysToDelete = this.audioCache.size - targetSize;
-            const keys = Array.from(this.audioCache.keys());
             let deletedCount = 0;
             
-            for (let i = 0; i < keys.length && deletedCount < keysToDelete; i++) {
-                // 检查是否在当前播放中
-                if (!this.currentAudio.has(keys[i])) {
-                    // 释放资源
-                    const oldAudio = this.audioCache.get(keys[i]);
-                    if (oldAudio) {
-                        try {
-                            // 停止播放
-                            oldAudio.pause();
-                            
-                            // 移除所有事件监听器
-                            oldAudio.oncanplaythrough = null;
-                            oldAudio.onerror = null;
-                            oldAudio.onended = null;
-                            oldAudio.onloadedmetadata = null;
-                            oldAudio.onpause = null;
-                            oldAudio.onplay = null;
-                            
-                            // 清空src属性释放媒体资源
-                            oldAudio.src = '';
-                            oldAudio.load();
-                            
-                            // 从缓存中移除
-                            this.audioCache.delete(keys[i]);
-                            deletedCount++;
-                        } catch (error) {
-                            console.error('清理音频资源时出错:', error);
-                        }
-                    }
+            // 使用增强的LRU逻辑多次移除最旧的项
+            for (let i = 0; i < keysToDelete; i++) {
+                const initialSize = this.audioCache.size;
+                this.removeOldestCacheItem();
+                
+                // 检查是否成功删除了一项
+                if (this.audioCache.size < initialSize) {
+                    deletedCount++;
+                } else {
+                    // 如果没有删除成功，可能是因为所有项都在使用中
+                    break;
                 }
             }
             
@@ -2116,7 +2177,10 @@ class AudioMixer {
         // 创建通知元素
         const notification = document.createElement('div');
         notification.className = 'notification';
-        notification.textContent = message;
+        
+        // 对消息进行安全处理，防止潜在的XSS攻击
+        const safeMessage = this.sanitizeHTML(message);
+        notification.textContent = safeMessage;
         
         // 添加到容器和通知列表
         container.appendChild(notification);
@@ -2333,11 +2397,24 @@ class AudioMixer {
             // 存储挂起的音频加载Promise
             this.pendingAudioLoads.set(normalizedUrl, audioLoadPromise);
             
-            // 返回Promise
-            return audioLoadPromise;
+            // 为Promise添加finally处理器，确保无论成功或失败都会清理挂起状态
+            const enhancedPromise = audioLoadPromise.finally(() => {
+                // 确保即使在Promise链的其他地方发生错误，也清理挂起状态
+                if (this.pendingAudioLoads && this.pendingAudioLoads.has(normalizedUrl)) {
+                    this.pendingAudioLoads.delete(normalizedUrl);
+                }
+            });
+            
+            // 更新存储的Promise为增强版本
+            this.pendingAudioLoads.set(normalizedUrl, enhancedPromise);
+            
+            // 返回增强的Promise
+            return enhancedPromise;
         } catch (error) {
             // 从挂起加载列表中移除
-            this.pendingAudioLoads.delete(normalizedUrl);
+            if (this.pendingAudioLoads) {
+                this.pendingAudioLoads.delete(normalizedUrl);
+            }
             
             // 隐藏加载指示器
             this.hideLoading();
@@ -2379,10 +2456,13 @@ class AudioMixer {
     handleAudioError(error, url, title) {
         console.error('音频处理错误:', error);
         
+        // 安全处理标题
+        const safeTitle = this.sanitizeHTML(title);
+        
         // 根据错误类型显示不同的提示
         let message = '';
         if (error.name === 'NotSupportedError') {
-            message = `不支持的音频格式: ${title}`;
+            message = `不支持的音频格式: ${safeTitle}`;
         } else if (error.name === 'NotAllowedError') {
             message = '浏览器阻止了自动播放，请点击界面后再试';
         } else if (error.name === 'AbortError') {
@@ -2390,7 +2470,7 @@ class AudioMixer {
         } else if (error.name === 'NetworkError' || error.message.includes('network')) {
             message = '网络错误，请检查您的连接';
         } else {
-            message = `无法播放音频: ${title}`;
+            message = `无法播放音频: ${safeTitle}`;
         }
         
         this.showErrorNotification(message);
@@ -2398,7 +2478,7 @@ class AudioMixer {
         // 记录详细错误信息
         const errorDetails = {
             url: url,
-            title: title,
+            title: safeTitle,
             error: {
                 name: error.name,
                 message: error.message,
