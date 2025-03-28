@@ -175,6 +175,22 @@ class AudioMixer {
         this.operationCounter = 0;
         this.activeOperations = new Map(); // 跟踪活跃的音频操作
         
+        // 用于跟踪所有创建的MutationObserver实例
+        this.activeObservers = [];
+        
+        // 用于跟踪添加的事件监听器
+        this.eventHandlers = {
+            trackArea: {
+                click: null,
+                touchstart: null,
+                touchend: null
+            },
+            playbackIndicator: {
+                mousedown: null,
+                touchstart: null
+            }
+        };
+        
         // 音频缓存大小限制
         this.MAX_CACHE_SIZE = 30; // 减少最大缓存数量，避免内存泄漏
         
@@ -194,19 +210,46 @@ class AudioMixer {
     }
 
     init() {
-        // 设置加载指示器
-        this.loadingIndicator = document.getElementById('loadingIndicator');
+        // 设置WebAudio上下文
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
+        // 初始化混音器状态
+        this.isPaused = true;
+        this.currentTime = 0;
+        this.trackVolumes = {};
+        this.masterVolume = 1;
+        
+        // 初始化时计算滚动条宽度
         this.calculateScrollbarWidth();
+        
+        // 初始化音频网格
         this.initializeAudioGrid();
+        
+        // 初始化时间轴
         this.initializeTimeAxis();
+        
+        // 初始化轨道
         this.initializeTracks();
+        
+        // 设置事件监听器
         this.setupEventListeners();
+        
+        // 设置拖放功能
         this.setupDragAndDrop();
         
-        // 添加页面卸载时的资源清理（使用箭头函数绑定this）
-        this._handleBeforeUnload = () => this.releaseResources();
+        // 添加页面卸载前的清理
+        this._handleBeforeUnload = () => {
+            // 确保清理所有资源，包括取消可能正在进行的动画帧
+            if (this.animationFrameId) {
+                cancelAnimationFrame(this.animationFrameId);
+                this.animationFrameId = null;
+            }
+            this.releaseResources();
+        };
+        
         window.addEventListener('beforeunload', this._handleBeforeUnload);
+        
+        console.log('音频混音器已初始化');
     }
 
     // 释放资源的方法
@@ -225,6 +268,30 @@ class AudioMixer {
         if (this.animationFrameId) {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = null;
+        }
+        
+        // 先取消所有活跃操作
+        if (this.activeOperations) {
+            // 遍历所有活跃操作，确保它们被正确终止
+            for (const [key, operation] of this.activeOperations.entries()) {
+                if (operation && operation.isActive) {
+                    // 标记操作为非活跃
+                    operation.isActive = false;
+                    
+                    // 如果操作关联的音频正在播放，停止它
+                    const audio = this.currentAudio.get(operation.url);
+                    if (audio) {
+                        try {
+                            audio.pause();
+                            audio.currentTime = 0;
+                        } catch (error) {
+                            console.error('停止活跃操作音频时出错:', error);
+                        }
+                    }
+                }
+            }
+            // 清空活跃操作Map
+            this.activeOperations.clear();
         }
         
         // 停止所有音频播放并释放资源
@@ -271,6 +338,26 @@ class AudioMixer {
         });
         this.audioCache.clear();
         
+        // 断开所有MutationObserver连接
+        try {
+            if (this.activeObservers && this.activeObservers.length > 0) {
+                console.log(`断开 ${this.activeObservers.length} 个MutationObserver连接`);
+                this.activeObservers.forEach(observer => {
+                    if (observer) {
+                        observer.disconnect();
+                    }
+                });
+                this.activeObservers = [];
+            }
+        } catch (error) {
+            console.error('断开MutationObserver连接时出错:', error);
+        }
+        
+        // 清理挂起的音频加载
+        if (this.pendingAudioLoads) {
+            this.pendingAudioLoads.clear();
+        }
+        
         // 移除DOM事件监听器
         this.removeAllEventListeners();
         
@@ -286,18 +373,54 @@ class AudioMixer {
                 this._handleBeforeUnload = null;
             }
             
+            // 移除轨道区域的特定事件监听器
+            const trackArea = document.getElementById('trackArea');
+            if (trackArea) {
+                // 移除保存的事件处理函数
+                if (this.eventHandlers.trackArea.click) {
+                    trackArea.removeEventListener('click', this.eventHandlers.trackArea.click);
+                    this.eventHandlers.trackArea.click = null;
+                }
+                
+                if (this.eventHandlers.trackArea.touchstart) {
+                    trackArea.removeEventListener('touchstart', this.eventHandlers.trackArea.touchstart);
+                    this.eventHandlers.trackArea.touchstart = null;
+                }
+                
+                if (this.eventHandlers.trackArea.touchend) {
+                    trackArea.removeEventListener('touchend', this.eventHandlers.trackArea.touchend);
+                    this.eventHandlers.trackArea.touchend = null;
+                }
+                
+                // 然后替换整个节点，以确保清理所有可能的内联监听器
+                const newTrackArea = trackArea.cloneNode(true);
+                trackArea.parentNode.replaceChild(newTrackArea, trackArea);
+            }
+            
+            // 移除播放指示器事件监听器
+            const playbackIndicator = document.getElementById('playbackIndicator');
+            if (playbackIndicator) {
+                // 移除保存的事件处理函数
+                if (this.eventHandlers.playbackIndicator.mousedown) {
+                    playbackIndicator.removeEventListener('mousedown', this.eventHandlers.playbackIndicator.mousedown);
+                    this.eventHandlers.playbackIndicator.mousedown = null;
+                }
+                
+                if (this.eventHandlers.playbackIndicator.touchstart) {
+                    playbackIndicator.removeEventListener('touchstart', this.eventHandlers.playbackIndicator.touchstart);
+                    this.eventHandlers.playbackIndicator.touchstart = null;
+                }
+                
+                // 然后替换整个节点
+                const newPlaybackIndicator = playbackIndicator.cloneNode(true);
+                playbackIndicator.parentNode.replaceChild(newPlaybackIndicator, playbackIndicator);
+            }
+            
             // 移除拖放相关事件监听器
             const audioGrid = document.getElementById('audioGrid');
             if (audioGrid) {
                 const newAudioGrid = audioGrid.cloneNode(true);
                 audioGrid.parentNode.replaceChild(newAudioGrid, audioGrid);
-            }
-            
-            // 移除轨道区域事件监听器
-            const trackArea = document.getElementById('trackArea');
-            if (trackArea) {
-                const newTrackArea = trackArea.cloneNode(true);
-                trackArea.parentNode.replaceChild(newTrackArea, trackArea);
             }
             
             // 移除控制按钮事件监听器
@@ -689,6 +812,10 @@ class AudioMixer {
             this.updateIndicatorPosition(clientX);
         };
         
+        // 保存事件处理函数引用
+        this.eventHandlers.playbackIndicator.mousedown = handlePointerDown;
+        this.eventHandlers.playbackIndicator.touchstart = handlePointerDown;
+        
         // 添加鼠标和触摸事件监听
         indicator.addEventListener('mousedown', handlePointerDown);
         indicator.addEventListener('touchstart', handlePointerDown, { passive: false });
@@ -719,6 +846,10 @@ class AudioMixer {
             this.updateIndicatorPosition(clientX);
         };
         
+        // 保存事件处理函数引用
+        this.eventHandlers.trackArea.click = handleTrackAreaClick;
+        
+        // 添加事件监听器
         trackArea.addEventListener('click', handleTrackAreaClick);
         
         // 触摸相关变量
@@ -726,14 +857,21 @@ class AudioMixer {
         let touchStartTime = 0;
         
         // 添加触摸开始事件监听，记录开始位置
-        trackArea.addEventListener('touchstart', (e) => {
+        const handleTouchStart = (e) => {
             if (!e.target.closest('.track-item') && !e.target.closest('.playback-indicator') && !isDragging) {
                 touchStartX = e.touches[0].clientX;
                 touchStartTime = Date.now();
             }
-        }, { passive: true });
+        };
         
-        trackArea.addEventListener('touchend', (e) => {
+        // 保存事件处理函数引用
+        this.eventHandlers.trackArea.touchstart = handleTouchStart;
+        
+        // 添加事件监听器
+        trackArea.addEventListener('touchstart', handleTouchStart, { passive: true });
+        
+        // 添加触摸结束事件监听
+        const handleTouchEnd = (e) => {
             // 避免滑动后触发点击，以及拖动操作后的点击
             if (!isDragging && !this._justFinishedDragging) {
                 // 计算触摸滑动距离和持续时间
@@ -746,7 +884,13 @@ class AudioMixer {
                     handleTrackAreaClick(e);
                 }
             }
-        });
+        };
+        
+        // 保存事件处理函数引用
+        this.eventHandlers.trackArea.touchend = handleTouchEnd;
+        
+        // 添加事件监听器
+        trackArea.addEventListener('touchend', handleTouchEnd);
     }
     
     // 添加更新指示器位置的方法
@@ -1438,6 +1582,11 @@ class AudioMixer {
             trackItem.removeEventListener('touchstart', handleTrackItemDrag);
             // 移除这个MutationObserver
             if (observer) {
+                // 从跟踪数组中移除
+                const observerIndex = this.activeObservers.indexOf(observer);
+                if (observerIndex > -1) {
+                    this.activeObservers.splice(observerIndex, 1);
+                }
                 observer.disconnect();
                 observer = null;
             }
@@ -1456,6 +1605,9 @@ class AudioMixer {
         
         // 开始观察父元素
         observer.observe(trackLane, { childList: true });
+        
+        // 将observer添加到跟踪数组中
+        this.activeObservers.push(observer);
         
         // 添加鼠标和触摸事件监听
         trackItem.addEventListener('mousedown', handleTrackItemDrag);
@@ -1537,6 +1689,12 @@ class AudioMixer {
 
     // 增强轨道项布局方法，处理长度不一致和潜在的重叠
     reorganizeTrackItems(trackLane) {
+        // 检查trackLane是否存在，防止对已销毁DOM的操作
+        if (!trackLane || !document.body.contains(trackLane)) {
+            console.warn('尝试重组不存在的轨道元素');
+            return;
+        }
+        
         const items = Array.from(trackLane.querySelectorAll('.track-item'));
         if (items.length === 0) return;
         
@@ -1606,28 +1764,46 @@ class AudioMixer {
                 this.animationFrameId = null;
             }
             
+            // 在请求新的animationFrame前保存一份引用以便在页面卸载时使用
+            const self = this;
+            const safeUpdates = updates.map(update => ({...update}));
+            
             // 使用requestAnimationFrame优化视觉更新，并保存返回的ID
             this.animationFrameId = requestAnimationFrame(() => {
-                updates.forEach(update => {
-                    if (update.remove) {
-                        update.element.remove();
-                    } else {
-                        update.element.style.gridColumnStart = update.start;
-                        update.element.style.gridColumnEnd = update.end;
-                        if (update.duration !== parseInt(update.element.dataset.duration)) {
-                            update.element.dataset.duration = update.duration;
+                // 安全检查：确保DOM元素仍存在于文档中
+                safeUpdates.forEach(update => {
+                    try {
+                        if (!update.element || !document.body.contains(update.element)) {
+                            return; // 跳过已移除的元素
                         }
+                        
+                        if (update.remove) {
+                            update.element.remove();
+                        } else {
+                            update.element.style.gridColumnStart = update.start;
+                            update.element.style.gridColumnEnd = update.end;
+                            if (update.duration !== parseInt(update.element.dataset.duration)) {
+                                update.element.dataset.duration = update.duration;
+                            }
+                        }
+                    } catch (error) {
+                        console.error('更新轨道项时出错:', error);
                     }
                 });
+                
                 // 完成后清空ID
-                this.animationFrameId = null;
+                if (self.animationFrameId) {
+                    self.animationFrameId = null;
+                }
             });
         }
 
         // 设置正确的网格行
         items.forEach(item => {
-            item.style.gridRowStart = "1";
-            item.style.gridRowEnd = "2";
+            if (item && document.body.contains(item)) {
+                item.style.gridRowStart = "1";
+                item.style.gridRowEnd = "2";
+            }
         });
     }
 
