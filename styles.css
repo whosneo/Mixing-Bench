@@ -388,28 +388,6 @@ body {
     cursor: pointer;
 }
 
-.remove-btn {
-    background: rgba(255,255,255,0.3);
-    border: none;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    color: white;
-    font-weight: bold;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    box-sizing: border-box;
-    transition: all 0.2s;
-}
-
-.remove-btn:hover {
-    background: rgba(255,255,255,0.5);
-    transform: scale(1.1);
-}
-
 .controls {
     text-align: center;
     margin: 3rem 0;
@@ -437,6 +415,25 @@ body {
 .control-btn:hover {
     transform: translateY(-3px);
     box-shadow: 0 8px 20px rgba(108, 92, 231, 0.3);
+}
+
+/* 音轨管理按钮样式 */
+.track-management {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: 15px;
+}
+
+.track-control-btn {
+    width: 45px;
+    height: 45px;
+    font-size: 1rem;
+    background: linear-gradient(135deg, #6c757d, #495057);
+}
+
+.track-control-btn:hover {
+    background: linear-gradient(135deg, #5a6268, #343a40);
 }
 
 .play-btn {

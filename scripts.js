@@ -161,6 +161,7 @@ class AudioMixer {
         ];
         this.currentAudio = new Map(); // 使用Map存储音频对象
         this.audioCache = new Map(); // 音频缓存，避免重复加载
+        this.cacheAccessOrder = []; // 缓存访问顺序数组初始化
         this.trackQueue = [];
         this.currentTime = 0;
         this.timelineInterval = null;
@@ -316,19 +317,17 @@ class AudioMixer {
         });
         this.currentAudio.clear();
         
-        // 清空缓存
-        this.audioCache.forEach(audio => {
+        // 清理所有音频缓存资源
+        this.audioCache.forEach((audio, url) => {
             if (audio) {
                 try {
                     audio.pause();
-                    // 移除所有事件监听器
                     audio.oncanplaythrough = null;
                     audio.onerror = null;
                     audio.onended = null;
                     audio.onloadedmetadata = null;
                     audio.onpause = null;
                     audio.onplay = null;
-                    // 清空src属性释放媒体资源
                     audio.src = '';
                     audio.load();
                 } catch (error) {
@@ -337,6 +336,7 @@ class AudioMixer {
             }
         });
         this.audioCache.clear();
+        this.cacheAccessOrder = []; // 同步清空cacheAccessOrder数组
         
         // 断开所有MutationObserver连接
         try {
@@ -665,6 +665,35 @@ class AudioMixer {
 
     initializeTracks() {
         const trackContainer = document.getElementById('trackContainer');
+        
+        // 保存现有轨道的内容
+        const existingTracks = {};
+        
+        // 收集现有轨道上的所有轨道项目
+        for (let i = 1; i <= this.trackCount + 1; i++) {
+            const trackId = `track${i}`;
+            const trackLane = document.getElementById(trackId);
+            if (trackLane) {
+                // 保存该轨道上的所有轨道项
+                const trackItems = Array.from(trackLane.querySelectorAll('.track-item'));
+                if (trackItems.length > 0) {
+                    existingTracks[trackId] = trackItems.map(item => {
+                        return {
+                            element: item.cloneNode(true),
+                            style: {
+                                gridColumnStart: item.style.gridColumnStart,
+                                gridColumnEnd: item.style.gridColumnEnd,
+                                gridRowStart: item.style.gridRowStart,
+                                gridRowEnd: item.style.gridRowEnd
+                            },
+                            dataset: { ...item.dataset }
+                        };
+                    });
+                }
+            }
+        }
+        
+        // 清空轨道容器
         trackContainer.innerHTML = '';
         
         // 使用文档片段批量添加音轨
@@ -696,6 +725,7 @@ class AudioMixer {
             volumeSlider.dataset.track = i.toString();
             volumeControl.appendChild(volumeSlider);
             
+            // 添加到轨道
             trackLane.appendChild(volumeControl);
             fragment.appendChild(trackLane);
             
@@ -705,6 +735,35 @@ class AudioMixer {
         
         // 一次性添加所有音轨到DOM
         trackContainer.appendChild(fragment);
+        
+        // 恢复保存的轨道项目
+        for (let i = 1; i <= this.trackCount; i++) {
+            const trackId = `track${i}`;
+            const trackLane = document.getElementById(trackId);
+            
+            if (trackLane && existingTracks[trackId]) {
+                // 恢复该轨道上的所有项目
+                existingTracks[trackId].forEach(savedItem => {
+                    const newItem = savedItem.element;
+                    
+                    // 恢复样式
+                    Object.keys(savedItem.style).forEach(prop => {
+                        newItem.style[prop] = savedItem.style[prop];
+                    });
+                    
+                    // 恢复数据属性
+                    Object.keys(savedItem.dataset).forEach(key => {
+                        newItem.dataset[key] = savedItem.dataset[key];
+                    });
+                    
+                    // 添加到轨道
+                    trackLane.appendChild(newItem);
+                    
+                    // 重新设置可拖动功能
+                    this.makeTrackItemDraggable(newItem, trackLane);
+                });
+            }
+        }
         
         // 使用事件委托，为trackContainer添加音量控制事件监听
         trackContainer.addEventListener('input', (e) => {
@@ -744,8 +803,85 @@ class AudioMixer {
             this.updateAllAudioVolumes();
         });
 
+        // 添加音轨管理功能
+        document.getElementById('addTrack').addEventListener('click', () => this.addTrack());
+        document.getElementById('removeTrack').addEventListener('click', () => this.removeLastTrack());
+
         // 添加播放指示器拖动功能
         this.setupPlaybackIndicatorDrag();
+    }
+
+    // 新增添加音轨方法
+    addTrack() {
+        // 限制最大音轨数量为8条
+        if (this.trackCount >= 8) {
+            this.showNotification('最多只能添加8条音轨');
+            return;
+        }
+        
+        this.trackCount++;
+        this.initializeTracks();
+        this.showNotification(`已添加音轨 ${this.trackCount}`);
+    }
+
+    // 新增删除音轨方法
+    removeLastTrack() {
+        // 限制最小音轨数量为1条
+        if (this.trackCount <= 1) {
+            this.showNotification('至少需要保留1条音轨');
+            return;
+        }
+        
+        // 检查最后一条音轨是否有内容
+        const trackLane = document.getElementById(`track${this.trackCount}`);
+        if (trackLane && trackLane.querySelectorAll('.track-item').length > 0) {
+            this.showNotification('无法删除有内容的音轨，请先清空该音轨');
+            return;
+        }
+        
+        // 移除最后一条轨道关联的所有Observers
+        if (trackLane) {
+            // 找到与此轨道关联的所有观察者
+            const observersToRemove = [];
+            
+            for (let i = 0; i < this.activeObservers.length; i++) {
+                const observer = this.activeObservers[i];
+                try {
+                    // 暂时断开连接
+                    observer.disconnect();
+                    
+                    // 尝试重新连接到最后一条轨道
+                    observer.observe(trackLane, { childList: true });
+                    
+                    // 如果成功，说明这个观察者是关联到最后一条轨道的
+                    observersToRemove.push(observer);
+                } catch (e) {
+                    // 不是关联到最后一条轨道的观察者，重新连接到它原来的元素
+                    try {
+                        // 对于其他观察者，我们无法确定它们原来观察的是什么
+                        // 所以暂时不做任何操作，等待垃圾回收处理
+                    } catch (innerError) {
+                        console.error('重新连接观察者时出错:', innerError);
+                    }
+                }
+            }
+            
+            // 断开所有找到的观察者
+            observersToRemove.forEach(observer => {
+                const index = this.activeObservers.indexOf(observer);
+                if (index !== -1) {
+                    this.activeObservers.splice(index, 1);
+                }
+                observer.disconnect();
+            });
+        }
+        
+        // 减少轨道计数并重新初始化
+        this.trackCount--;
+        this.initializeTracks();
+        
+        // 通知用户
+        this.showNotification(`已删除音轨 ${this.trackCount + 1}`);
     }
 
     // 增强的播放指示器拖动功能，添加触摸支持
@@ -1241,11 +1377,6 @@ class AudioMixer {
         // 添加新项到缓存
         this.audioCache.set(url, audio);
         
-        // 如果不存在缓存访问顺序数组，则创建一个
-        if (!this.cacheAccessOrder) {
-            this.cacheAccessOrder = [];
-        }
-        
         // 将新添加的项添加到访问顺序数组的末尾（表示最近使用）
         // 先确保没有重复
         const existingIndex = this.cacheAccessOrder.indexOf(url);
@@ -1275,9 +1406,9 @@ class AudioMixer {
     
     // 移除最旧的缓存项（真正的LRU实现）
     removeOldestCacheItem() {
-        // 确保访问顺序数组存在
-        if (!this.cacheAccessOrder || this.cacheAccessOrder.length === 0) {
-            // 如果不存在或为空，则重建
+        // 确保访问顺序数组有数据
+        if (this.cacheAccessOrder.length === 0) {
+            // 如果为空，则重建
             this.rebuildCacheAccessOrder();
             
             // 如果仍然为空，则无法继续
@@ -1357,11 +1488,6 @@ class AudioMixer {
     
     // 更新缓存项的LRU顺序
     updateCacheOrder(url) {
-        // 确保访问顺序数组存在
-        if (!this.cacheAccessOrder) {
-            this.cacheAccessOrder = [];
-        }
-        
         // 从访问顺序中移除此URL（如果存在），然后添加到末尾（表示最近使用）
         const index = this.cacheAccessOrder.indexOf(url);
         if (index !== -1) {
@@ -1587,7 +1713,9 @@ class AudioMixer {
             document.body.style.cursor = '';
             
             // 重新组织轨道项目
-            this.reorganizeTrackItems(trackLane);
+            if (trackLane && document.body.contains(trackLane)) {
+                this.reorganizeTrackItems(trackLane);
+            }
         };
         
         // 为事件处理函数创建绑定版本
@@ -1639,36 +1767,71 @@ class AudioMixer {
                 removeEventListeners();
                 isDragging = false;
             }
-            trackItem.removeEventListener('mousedown', handleTrackItemDrag);
-            trackItem.removeEventListener('touchstart', handleTrackItemDrag);
+            
+            // 安全移除事件监听器
+            if (trackItem) {
+                try {
+                    trackItem.removeEventListener('mousedown', handleTrackItemDrag);
+                    trackItem.removeEventListener('touchstart', handleTrackItemDrag);
+                } catch (e) {
+                    console.error('移除轨道项事件监听器时出错:', e);
+                }
+            }
+            
             // 移除这个MutationObserver
             if (observer) {
-                // 从跟踪数组中移除
-                const observerIndex = this.activeObservers.indexOf(observer);
-                if (observerIndex > -1) {
-                    this.activeObservers.splice(observerIndex, 1);
+                try {
+                    // 从跟踪数组中移除
+                    const observerIndex = this.activeObservers.indexOf(observer);
+                    if (observerIndex > -1) {
+                        this.activeObservers.splice(observerIndex, 1);
+                    }
+                    observer.disconnect();
+                    observer = null;
+                } catch (e) {
+                    console.error('断开MutationObserver连接时出错:', e);
                 }
-                observer.disconnect();
-                observer = null;
             }
         };
+        
+        // 为轨道项添加唯一ID，用于标识
+        if (!trackItem.dataset.itemId) {
+            trackItem.dataset.itemId = 'track_item_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        }
         
         // 使用MutationObserver监听元素是否被移除
         let observer = new MutationObserver((mutations) => {
             for (const mutation of mutations) {
-                if (mutation.type === 'childList' && 
-                    Array.from(mutation.removedNodes).includes(trackItem)) {
-                    cleanupTrackItem();
-                    break;
+                if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
+                    // 只关心包含当前轨道项的变化
+                    for (let i = 0; i < mutation.removedNodes.length; i++) {
+                        const removedNode = mutation.removedNodes[i];
+                        // 检查是否是当前轨道项或包含当前轨道项
+                        if (removedNode === trackItem || 
+                            (removedNode.contains && removedNode.contains(trackItem))) {
+                            console.log(`MutationObserver: 检测到轨道项 ${trackItem.dataset.itemId} 被移除`);
+                            cleanupTrackItem();
+                            break;
+                        }
+                    }
                 }
             }
         });
         
         // 开始观察父元素
-        observer.observe(trackLane, { childList: true });
-        
-        // 将observer添加到跟踪数组中
-        this.activeObservers.push(observer);
+        if (trackLane) {
+            try {
+                observer.observe(trackLane, { childList: true, subtree: false });
+                
+                // 保存到该轨道项的数据集中，便于后续引用
+                trackItem.dataset.observerId = this.activeObservers.length;
+                
+                // 将observer添加到跟踪数组中
+                this.activeObservers.push(observer);
+            } catch (e) {
+                console.error('设置MutationObserver时出错:', e);
+            }
+        }
         
         // 添加鼠标和触摸事件监听
         trackItem.addEventListener('mousedown', handleTrackItemDrag);
@@ -1676,6 +1839,15 @@ class AudioMixer {
     }
 
     addTrackToTimeline(data, targetTrack) {
+        // 确保目标轨道有效
+        if (!targetTrack || !document.body.contains(targetTrack)) {
+            this.showErrorNotification('无效的目标轨道');
+            return;
+        }
+        
+        // 记录轨道ID，以便后续操作可以正确引用
+        const trackId = targetTrack.id;
+        
         // 查找可用位置
         const position = this.findAvailablePosition(targetTrack);
         if (!position) {
@@ -1683,18 +1855,41 @@ class AudioMixer {
             return;
         }
 
+        // 创建轨道项目并设置属性
         const trackItem = this.createTrackItem(data, position);
+        
+        // 确保轨道项拥有轨道ID属性，便于后续操作引用
+        trackItem.dataset.trackId = trackId;
+        
+        // 添加到DOM
         targetTrack.appendChild(trackItem);
+        
+        // 设置拖拽功能
         this.makeTrackItemDraggable(trackItem, targetTrack);
-        this.trackQueue.push({...data, trackId: targetTrack.id});
+        
+        // 添加到轨道队列，确保包含轨道ID
+        const trackData = {...data, trackId: trackId};
+        this.trackQueue.push(trackData);
 
-        // 预加载音频
-        this.preloadAudio(data.url).catch(error => {
-            this.handleAudioError(error, data.url, data.title);
-        });
+        // 预加载音频，并优化错误处理
+        this.preloadAudio(data.url)
+            .then(audio => {
+                // 记录此音频与轨道的关联，以便在removeTrack时能够正确处理
+                if (audio) {
+                    audio.dataset = audio.dataset || {};
+                    audio.dataset.trackId = trackId;
+                }
+            })
+            .catch(error => {
+                this.handleAudioError(error, data.url, data.title);
+            });
         
         // 使用防抖重组所有轨道
-        this.debouncedReorganize();
+        if (this.debouncedReorganize) {
+            this.debouncedReorganize();
+        } else {
+            this.reorganizeTrackItems(targetTrack);
+        }
     }
 
     findAvailablePosition(track) {
@@ -1870,19 +2065,202 @@ class AudioMixer {
 
     // 确保removeTrack方法正确定义
     removeTrack(trackItem) {
-        const url = trackItem.dataset.url;
-        const audio = this.currentAudio.get(url);
-        
-        if (audio) {
-            audio.pause();
-            audio.currentTime = 0;
-            this.currentAudio.delete(url);
+        if (!trackItem || !document.body.contains(trackItem)) {
+            console.error('尝试删除不存在的轨道项');
+            return;
         }
-
+        
+        // 存储需要删除的项目的原始引用
+        const originalTrackItem = trackItem;
+        
+        // 获取用于音频和操作识别的URL和轨道信息
+        const url = trackItem.dataset.url;
         const trackLane = trackItem.parentElement;
-        trackItem.remove();
-        this.trackQueue = this.trackQueue.filter(item => item.url !== url);
-        this.reorganizeTrackItems(trackLane);
+        const trackId = trackLane ? trackLane.id : trackItem.dataset.trackId;
+        
+        console.log(`正在删除轨道项: URL=${url}, 轨道ID=${trackId}`);
+        
+        // 查找此轨道项的MutationObserver并先断开连接
+        // 这样可以防止触发其他轨道项的事件处理程序
+        const observerToRemove = this.findObserverForTrackItem(trackItem);
+        if (observerToRemove) {
+            const observerIndex = this.activeObservers.indexOf(observerToRemove);
+            if (observerIndex > -1) {
+                this.activeObservers.splice(observerIndex, 1);
+            }
+            observerToRemove.disconnect();
+            console.log('已断开轨道项的MutationObserver连接');
+        }
+        
+        // 清理与此特定轨道项相关的音频资源
+        if (this.currentAudio.has(url)) {
+            const audio = this.currentAudio.get(url);
+            // 检查音频是否与当前轨道关联
+            const audioTrackId = audio.dataset && audio.dataset.trackId;
+            
+            // 只处理与当前轨道相关的音频
+            if (audio && (!audioTrackId || audioTrackId === trackId)) {
+                // 先暂停播放
+                audio.pause();
+                
+                // 只有当没有其他轨道使用此URL时才释放资源
+                if (!this.isUrlBeingUsedElsewhere(url, originalTrackItem)) {
+                    audio.oncanplaythrough = null;
+                    audio.onerror = null;
+                    audio.onended = null;
+                    audio.onloadedmetadata = null;
+                    audio.onpause = null;
+                    audio.onplay = null;
+                    audio.currentTime = 0;
+                    audio.src = '';
+                    audio.load();
+                    this.currentAudio.delete(url);
+                    console.log('已清理音频资源');
+                } else {
+                    console.log('音频仍被其他轨道使用，保留资源');
+                }
+            }
+        }
+        
+        // 清理与此特定元素相关的活跃操作
+        const operationsToRemove = [];
+        for (const [key, operation] of this.activeOperations.entries()) {
+            // 只清理确实匹配当前轨道项的操作
+            const isMatchingOperation = 
+                operation.url === url && 
+                (operation.trackId === trackId || 
+                 operation.trackItem === originalTrackItem ||
+                 (operation.trackItem && operation.trackItem.isSameNode && operation.trackItem.isSameNode(originalTrackItem)));
+                
+            if (isMatchingOperation) {
+                operation.isActive = false;
+                operationsToRemove.push(key);
+                console.log(`标记操作${key}为删除`);
+            }
+        }
+        
+        // 从Map中删除标记的操作
+        operationsToRemove.forEach(key => {
+            this.activeOperations.delete(key);
+            console.log(`已删除操作: ${key}`);
+        });
+        
+        // 从轨道队列中移除，但只移除匹配当前轨道的项目
+        const originalQueueSize = this.trackQueue.length;
+        this.trackQueue = this.trackQueue.filter(item => 
+            !(item.url === url && item.trackId === trackId));
+        console.log(`从轨道队列中移除了 ${originalQueueSize - this.trackQueue.length} 个项目`);
+        
+        // 直接移除元素，确保移除的是正确的元素
+        try {
+            // 我们先移除DOM元素，这会触发自定义MutationObserver进行正确的清理
+            if (trackLane && trackLane.contains(originalTrackItem)) {
+                // 从trackLane中直接移除，避免任何其他干扰
+                trackLane.removeChild(originalTrackItem);
+                console.log('已从DOM中移除轨道项');
+            } else if (originalTrackItem.parentElement) {
+                // 备用方法，如果trackLane引用不正确
+                originalTrackItem.parentElement.removeChild(originalTrackItem);
+                console.log('已使用备用方法从DOM中移除轨道项');
+            } else {
+                console.warn('轨道项没有父元素，可能已被移除');
+            }
+        } catch (error) {
+            console.error('移除轨道项时出错:', error);
+        }
+        
+        // 重新组织剩余的轨道项目（只影响当前轨道）
+        if (trackLane && document.body.contains(trackLane)) {
+            console.log('重新组织轨道布局');
+            this.reorganizeTrackItems(trackLane);
+        }
+        
+        // 检查轨道中是否还有其他项目，如果没有，可以添加一个视觉提示
+        if (trackLane && trackLane.querySelectorAll('.track-item').length === 0) {
+            console.log('轨道现在为空');
+        }
+    }
+    
+    // 新方法：根据trackItem查找对应的MutationObserver
+    findObserverForTrackItem(trackItem) {
+        if (!this.activeObservers || !this.activeObservers.length) {
+            return null;
+        }
+        
+        // 遍历活跃的观察者
+        for (const observer of this.activeObservers) {
+            // MutationObserver没有直接的方法来检查它监视哪个元素
+            // 但我们可以通过观察一个临时元素并检查是否触发来判断
+            
+            // 这是一个启发式方法：
+            // 我们尝试断开后重新连接，如果它正在监视trackItem的父元素，就找到了
+            if (trackItem.parentElement) {
+                try {
+                    // 临时断开连接
+                    observer.disconnect();
+                    
+                    // 重新连接到trackItem的父元素
+                    observer.observe(trackItem.parentElement, { childList: true });
+                    
+                    // 假设这是正确的观察者
+                    return observer;
+                } catch (e) {
+                    // 这不是正确的观察者，继续尝试
+                    continue;
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    // 优化的检查URL是否被其他轨道项使用的方法
+    isUrlBeingUsedElsewhere(url, excludeItem) {
+        if (!url) return false;
+        
+        try {
+            // 检查是否有其他轨道项使用此URL
+            const trackItems = document.querySelectorAll('.track-item[data-url="' + this.sanitizeHTML(url) + '"]');
+            console.log(`查找使用URL=${url}的轨道项: 找到${trackItems.length}个`);
+            
+            for (const item of trackItems) {
+                // 排除当前正在删除的项目
+                if (item !== excludeItem) {
+                    console.log('找到其他轨道项使用相同URL');
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.error('检查URL使用时出错:', error);
+            // 保险起见，返回true以避免释放可能仍在使用的资源
+            return true;
+        }
+        
+        console.log('没有其他轨道项使用此URL');
+        return false;
+    }
+    
+    // 保留现有的isUrlBeingUsed方法用于缓存管理
+    isUrlBeingUsed(url) {
+        // 检查是否在当前播放的音频中
+        if (this.currentAudio.has(url)) {
+            return true;
+        }
+        
+        // 检查轨道队列中是否有该URL
+        if (this.trackQueue.some(item => item.url === url)) {
+            return true;
+        }
+        
+        // 检查DOM中是否还有使用此URL的轨道项
+        const trackItems = document.querySelectorAll('.track-item');
+        for (const item of trackItems) {
+            if (item.dataset.url === url) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 
     // 确保togglePlayback方法正确定义
@@ -1989,8 +2367,14 @@ class AudioMixer {
 
     // 修改 playTrackItem 方法，使用音频文件的实际长度并添加事件监听而不是setTimeout
     async playTrackItem(trackItem) {
+        if (!trackItem || !document.body.contains(trackItem)) {
+            console.error('尝试播放无效的轨道项');
+            return;
+        }
+        
         const url = trackItem.dataset.url;
-        const trackId = trackItem.closest('.track-lane').id;
+        const trackLane = trackItem.closest('.track-lane');
+        const trackId = trackLane ? trackLane.id : trackItem.dataset.trackId;
         const trackVolume = this.trackVolumes[trackId] || 1;
         const title = trackItem.dataset.title;
         
@@ -2002,85 +2386,96 @@ class AudioMixer {
         this.activeOperations.set(audioOperationId, {
             url,
             timestamp: Date.now(),
-            trackId,
-            isActive: true
+            isActive: true,
+            trackId: trackId, // 保存轨道ID
+            trackItem: trackItem // 保存对轨道项的引用
         });
         
         try {
-            const audio = await this.preloadAudio(url);
+            // 添加播放动画
+            trackItem.classList.add('playing');
             
-            // 检查操作是否仍然有效
-            if (!this.activeOperations.has(audioOperationId) || 
-                !this.activeOperations.get(audioOperationId).isActive) {
-                return;
+            // 首先尝试从缓存获取音频
+            let audio = null;
+            
+            // 检查是否已在当前播放列表中
+            if (this.currentAudio.has(url)) {
+                audio = this.currentAudio.get(url);
+                if (audio.error) {
+                    this.currentAudio.delete(url);
+                    audio = null;
+                }
             }
             
+            // 如果当前没有可用的音频，从缓存或尝试加载新的
+            if (!audio) {
+                try {
+                    audio = await this.preloadAudio(url);
+                    
+                    // 保存轨道ID关联
+                    audio.dataset = audio.dataset || {};
+                    audio.dataset.trackId = trackId;
+                    
+                    // 添加到当前播放列表
+                    this.currentAudio.set(url, audio);
+                } catch (error) {
+                    // 如果加载失败，移除播放动画并退出
+                    trackItem.classList.remove('playing');
+                    this.handleAudioError(error, url, title);
+                    
+                    // 标记操作为非活跃
+                    const operation = this.activeOperations.get(audioOperationId);
+                    if (operation) {
+                        operation.isActive = false;
+                    }
+                    
+                    return;
+                }
+            }
+            
+            // 重置音频状态
             audio.currentTime = 0;
+            audio.volume = trackVolume * (this.masterVolume / 100);
             
-            // 设置音量 - 使用主音量和音轨音量的组合
-            audio.volume = this.masterVolume * trackVolume;
+            // 确保移除之前可能存在的事件监听器
+            audio.onended = null;
             
-            // 使用自定义属性标记这个音频对象
-            audio._operationId = audioOperationId;
-            audio._trackId = trackId;
-            audio._url = url;
-            
-            // 添加ended事件监听，而不是使用setTimeout
+            // 添加结束事件处理
             audio.onended = () => {
-                // 只有当操作仍然是活跃的，才操作Map
-                if (this.activeOperations.has(audioOperationId) && 
-                    this.activeOperations.get(audioOperationId).isActive) {
-                    audio.pause();
-                    audio.currentTime = 0;
-                    this.currentAudio.delete(url);
-                    this.activeOperations.delete(audioOperationId);
+                // 移除播放动画
+                trackItem.classList.remove('playing');
+                
+                // 标记操作为非活跃
+                const operation = this.activeOperations.get(audioOperationId);
+                if (operation) {
+                    operation.isActive = false;
                 }
             };
             
-            // 添加错误处理
-            audio.onerror = (e) => {
-                if (this.activeOperations.has(audioOperationId) && 
-                    this.activeOperations.get(audioOperationId).isActive) {
-                    this.handleAudioError(e.error || new Error('音频播放错误'), url, title);
-                    this.currentAudio.delete(url);
-                    this.activeOperations.delete(audioOperationId);
-                }
-            };
-            
-            await audio.play();
-
-            // 检查操作是否仍然有效
-            if (!this.activeOperations.has(audioOperationId) || 
-                !this.activeOperations.get(audioOperationId).isActive) {
-                audio.pause();
-                return;
-            }
-
-            // 使用音频的实际长度，而不是固定的5秒
-            const duration = audio.duration ? audio.duration : 5; // 如果获取不到时长，默认为5秒
-            
-            // 更新trackItem的持续时间数据（用于未来显示）
-            if (audio.duration && audio.duration !== 5) {
-                trackItem.dataset.duration = Math.ceil(audio.duration);
-                // 如果音频实际长度与轨道项显示长度不匹配，则更新轨道项长度
-                const currentEnd = parseInt(trackItem.style.gridColumnEnd);
-                const currentStart = parseInt(trackItem.style.gridColumnStart);
-                if (currentEnd - currentStart !== Math.ceil(audio.duration)) {
-                    const newLength = Math.min(Math.ceil(audio.duration), 30 - currentStart + 1);
-                    trackItem.style.gridColumnEnd = currentStart + newLength;
-                    // 更新后重新组织轨道项，确保没有重叠
-                    this.debouncedReorganize();
+            // 播放音频
+            try {
+                await audio.play();
+            } catch (playError) {
+                // 处理播放错误
+                trackItem.classList.remove('playing');
+                this.handleAudioError(playError, url, title);
+                
+                // 标记操作为非活跃
+                const operation = this.activeOperations.get(audioOperationId);
+                if (operation) {
+                    operation.isActive = false;
                 }
             }
-
-            // 安全地更新Map
-            this.currentAudio.set(url, audio);
         } catch (error) {
-            // 错误时清理操作状态
-            if (this.activeOperations.has(audioOperationId)) {
-                this.activeOperations.delete(audioOperationId);
-            }
+            // 处理其他错误
+            trackItem.classList.remove('playing');
             this.handleAudioError(error, url, title);
+            
+            // 标记操作为非活跃
+            const operation = this.activeOperations.get(audioOperationId);
+            if (operation) {
+                operation.isActive = false;
+            }
         }
     }
 
@@ -2300,6 +2695,12 @@ class AudioMixer {
             if (cachedAudio.error) {
                 console.warn(`缓存的音频存在错误，重新加载: ${normalizedUrl}`);
                 this.audioCache.delete(normalizedUrl);
+                
+                // 同步从访问顺序数组中删除
+                const orderIndex = this.cacheAccessOrder.indexOf(normalizedUrl);
+                if (orderIndex !== -1) {
+                    this.cacheAccessOrder.splice(orderIndex, 1);
+                }
             } else {
                 // 重置音频状态
                 cachedAudio.currentTime = 0;
@@ -2456,40 +2857,146 @@ class AudioMixer {
     handleAudioError(error, url, title) {
         console.error('音频处理错误:', error);
         
-        // 安全处理标题
-        const safeTitle = this.sanitizeHTML(title);
+        // 安全处理标题和URL
+        const safeTitle = this.sanitizeHTML(title || '未知音频');
+        const safeUrl = url ? this.sanitizeHTML(url.split('/').pop()) : '未知文件';
         
         // 根据错误类型显示不同的提示
         let message = '';
-        if (error.name === 'NotSupportedError') {
-            message = `不支持的音频格式: ${safeTitle}`;
-        } else if (error.name === 'NotAllowedError') {
-            message = '浏览器阻止了自动播放，请点击界面后再试';
-        } else if (error.name === 'AbortError') {
-            message = '音频加载被中断';
-        } else if (error.name === 'NetworkError' || error.message.includes('network')) {
-            message = '网络错误，请检查您的连接';
+        let suggestedAction = '';
+        
+        // 确定错误类型和相应的提示信息
+        if (error instanceof MediaError || (error.target && error.target.error instanceof MediaError)) {
+            const mediaError = error instanceof MediaError ? error : error.target.error;
+            const errorCode = mediaError ? mediaError.code : 0;
+            
+            // 根据MediaError代码确定错误类型
+            switch (errorCode) {
+                case MediaError.MEDIA_ERR_ABORTED:
+                    message = `播放被中断: ${safeTitle}`;
+                    suggestedAction = '请重试播放';
+                    break;
+                case MediaError.MEDIA_ERR_NETWORK:
+                    message = `网络错误，无法加载: ${safeTitle}`;
+                    suggestedAction = '请检查您的网络连接并重试';
+                    break;
+                case MediaError.MEDIA_ERR_DECODE:
+                    message = `音频解码失败: ${safeTitle}`;
+                    suggestedAction = '音频文件可能已损坏，请尝试其他音频';
+                    break;
+                case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                    message = `不支持的音频格式: ${safeTitle}`;
+                    suggestedAction = '请尝试其他格式，如MP3或WAV';
+                    break;
+                default:
+                    message = `播放错误(${errorCode}): ${safeTitle}`;
+                    suggestedAction = '请重试或选择其他音频';
+            }
         } else {
-            message = `无法播放音频: ${safeTitle}`;
+            // 处理其他类型的错误
+            if (error.name === 'NotSupportedError') {
+                message = `不支持的音频格式: ${safeTitle}`;
+                suggestedAction = '请尝试其他格式，如MP3或WAV';
+            } else if (error.name === 'NotAllowedError') {
+                message = `浏览器阻止了自动播放: ${safeTitle}`;
+                suggestedAction = '请点击页面后再次尝试播放';
+            } else if (error.name === 'AbortError') {
+                message = `音频加载被中断: ${safeTitle}`;
+                suggestedAction = '请重试播放';
+            } else if (error.name === 'NetworkError' || (error.message && error.message.includes('network'))) {
+                message = `网络错误，无法加载: ${safeTitle}`;
+                suggestedAction = '请检查您的网络连接并重试';
+            } else if (error.name === 'TimeoutError' || (error.message && error.message.includes('timeout'))) {
+                message = `音频加载超时: ${safeTitle}`;
+                suggestedAction = '请检查网络速度或尝试较小的音频文件';
+            } else if (error.name === 'QuotaExceededError') {
+                message = `存储空间不足: ${safeTitle}`;
+                suggestedAction = '请关闭一些浏览器标签页释放内存';
+            } else {
+                message = `无法播放音频: ${safeTitle}`;
+                suggestedAction = '请重试或选择其他音频';
+            }
         }
         
-        this.showErrorNotification(message);
+        // 组合错误信息和建议操作
+        const fullMessage = `${message}。${suggestedAction}`;
+        this.showErrorNotification(fullMessage);
         
-        // 记录详细错误信息
+        // 记录详细错误信息用于调试
         const errorDetails = {
             url: url,
             title: safeTitle,
             error: {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
+                name: error.name || 'Unknown',
+                message: error.message || 'No message',
+                code: error.code || (error.target && error.target.error ? error.target.error.code : 'No code'),
+                stack: error.stack || 'No stack'
             },
-            time: new Date().toISOString()
+            time: new Date().toISOString(),
+            browser: navigator.userAgent
         };
         
         console.log('详细错误信息:', errorDetails);
         
-        // 可以在这里添加错误上报逻辑
+        // 尝试清理相关资源
+        this.cleanupAfterError(url);
+        
+        // 返回错误详情，方便调用者进一步处理
+        return errorDetails;
+    }
+    
+    // 添加错误后的资源清理方法
+    cleanupAfterError(url) {
+        if (!url) return;
+        
+        // 清理当前播放的音频
+        if (this.currentAudio.has(url)) {
+            const audio = this.currentAudio.get(url);
+            if (audio) {
+                try {
+                    audio.pause();
+                    audio.oncanplaythrough = null;
+                    audio.onerror = null;
+                    audio.onended = null;
+                    audio.onloadedmetadata = null;
+                    audio.onpause = null;
+                    audio.onplay = null;
+                    audio.src = '';
+                    audio.load();
+                } catch (e) {
+                    console.error('清理错误音频资源时出错:', e);
+                }
+                this.currentAudio.delete(url);
+            }
+        }
+        
+        // 清理挂起的加载请求
+        if (this.pendingAudioLoads && this.pendingAudioLoads.has(url)) {
+            this.pendingAudioLoads.delete(url);
+        }
+        
+        // 考虑从缓存中移除错误的音频
+        if (this.audioCache.has(url)) {
+            const cachedAudio = this.audioCache.get(url);
+            if (cachedAudio) {
+                try {
+                    cachedAudio.src = '';
+                    cachedAudio.load();
+                } catch (e) {
+                    console.error('清理错误缓存音频时出错:', e);
+                }
+                this.audioCache.delete(url);
+                
+                // 同步从访问顺序数组中删除
+                const orderIndex = this.cacheAccessOrder.indexOf(url);
+                if (orderIndex !== -1) {
+                    this.cacheAccessOrder.splice(orderIndex, 1);
+                }
+            }
+        }
+        
+        // 如果正在显示加载指示器，隐藏它
+        this.hideLoading();
     }
 }
 
