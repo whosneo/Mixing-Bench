@@ -4052,17 +4052,27 @@ const audioMixer = new AudioMixer();
     
     // 在页面加载和窗口大小改变时检查
     window.addEventListener('load', function() {
-        // 检查用户是否已经关闭过提示
         try {
             if (localStorage.getItem('device-warning-dismissed') === 'true') {
                 return; // 用户已关闭提示，不再显示
             }
+            checkDeviceSize(); // 只在初始加载时检查一次
         } catch (e) {
             console.error('读取存储时出错:', e);
         }
-        
-        checkDeviceSize();
     });
     
-    window.addEventListener('resize', checkDeviceSize);
+    // 限制窗口大小检查的频率
+    const debouncedCheckSize = debounce(function() {
+        try {
+            if (localStorage.getItem('device-warning-dismissed') === 'true') {
+                return; // 用户已关闭提示，不再显示
+            }
+            checkDeviceSize();
+        } catch (e) {
+            console.error('读取存储时出错:', e);
+        }
+    }, 500);
+    
+    window.addEventListener('resize', debouncedCheckSize);
 })();
