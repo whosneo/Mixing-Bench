@@ -12,62 +12,83 @@
     <meta name="theme-color" content="#6c5ce7">
     <meta name="format-detection" content="telephone=no">
     <title>Mixing Bench - 专业音频混音工具</title>
+    <!-- 预加载字体图标，提高加载性能 -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
+    <main class="container">
         <div class="layout">
-            <div class="sidebar">
-                <div class="audio-grid" id="audioGrid"></div>
-            </div>
-            <div class="main-content">
-                <div class="controls">
-                    <button class="control-btn" id="playTrack" aria-label="播放">
-                        <i class="fas fa-play" id="playIcon"></i>
-                    </button>
-                    <button class="control-btn" id="stop" aria-label="停止">
-                        <i class="fas fa-stop"></i>
-                    </button>
-                    <!-- 添加主音量控制 -->
-                    <div class="volume-control">
-                        <i class="fas fa-volume-up" aria-hidden="true"></i>
-                        <input type="range" id="masterVolume" class="volume-slider" min="0" max="100" value="100" 
-                               aria-label="主音量" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
-                    </div>
-                    <!-- 添加音轨管理按钮 -->
-                    <div class="track-management">
-                        <button class="control-btn track-control-btn" id="addTrack" title="添加音轨" aria-label="添加音轨">
-                            <i class="fas fa-plus" aria-hidden="true"></i>
+            <aside class="sidebar">
+                <nav aria-label="音频素材库">
+                    <div class="audio-grid" id="audioGrid"></div>
+                </nav>
+            </aside>
+            <section class="main-content">
+                <header class="controls-header">
+                    <div class="controls">
+                        <button class="control-btn" id="playTrack" aria-label="播放">
+                            <i class="fas fa-play" id="playIcon" aria-hidden="true"></i>
+                            <span class="sr-only">播放</span>
                         </button>
-                        <button class="control-btn track-control-btn" id="removeTrack" title="删除音轨" aria-label="删除音轨">
-                            <i class="fas fa-minus" aria-hidden="true"></i>
+                        <button class="control-btn" id="stop" aria-label="停止">
+                            <i class="fas fa-stop" aria-hidden="true"></i>
+                            <span class="sr-only">停止</span>
                         </button>
+                        <!-- 添加主音量控制 -->
+                        <div class="volume-control">
+                            <label for="masterVolume" class="volume-label">
+                                <i class="fas fa-volume-up" aria-hidden="true"></i>
+                                <span class="sr-only">主音量</span>
+                            </label>
+                            <input type="range" id="masterVolume" class="volume-slider" min="0" max="100" value="100" 
+                                   aria-label="主音量" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+                        </div>
+                        <!-- 添加音轨管理按钮 -->
+                        <div class="track-management">
+                            <button class="control-btn track-control-btn" id="addTrack" title="添加音轨" aria-label="添加音轨">
+                                <i class="fas fa-plus" aria-hidden="true"></i>
+                                <span class="sr-only">添加音轨</span>
+                            </button>
+                            <button class="control-btn track-control-btn" id="removeTrack" title="删除音轨" aria-label="删除音轨">
+                                <i class="fas fa-minus" aria-hidden="true"></i>
+                                <span class="sr-only">删除音轨</span>
+                            </button>
+                        </div>
                     </div>
-                </div>
-                <div class="track-area" id="trackArea" aria-label="音轨区域">
-                    <div class="time-axis" id="timeAxis" aria-label="时间轴">
+                </header>
+                <section class="track-area" id="trackArea" aria-label="音轨区域">
+                    <header class="time-axis" id="timeAxis" aria-label="时间轴">
                         <!-- 时间轴将由JS动态生成 -->
+                    </header>
+                    <div class="track-container" id="trackContainer" role="list" aria-label="音轨列表">
+                        <div class="track-lane" data-track-name="音轨 1" id="track1" aria-label="音轨 1" role="listitem" tabindex="0"></div>
+                        <div class="track-lane" data-track-name="音轨 2" id="track2" aria-label="音轨 2" role="listitem" tabindex="0"></div>
+                        <div class="track-lane" data-track-name="音轨 3" id="track3" aria-label="音轨 3" role="listitem" tabindex="0"></div>
+                        <div class="track-lane" data-track-name="音轨 4" id="track4" aria-label="音轨 4" role="listitem" tabindex="0"></div>
                     </div>
-                    <div class="track-container" id="trackContainer">
-                        <div class="track-lane" data-track-name="音轨 1" id="track1" aria-label="音轨 1"></div>
-                        <div class="track-lane" data-track-name="音轨 2" id="track2" aria-label="音轨 2"></div>
-                        <div class="track-lane" data-track-name="音轨 3" id="track3" aria-label="音轨 3"></div>
-                        <div class="track-lane" data-track-name="音轨 4" id="track4" aria-label="音轨 4"></div>
-                    </div>
-                    <div class="playback-indicator" id="playbackIndicator" aria-label="播放指示器" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
-                </div>
-            </div>
+                    <div class="playback-indicator" id="playbackIndicator" aria-label="播放指示器" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"></div>
+                </section>
+            </section>
         </div>
         
         <!-- 添加加载状态指示器 -->
         <div id="loadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite" role="status">
-            <div class="spinner"></div>
+            <div class="spinner" aria-hidden="true"></div>
             <div class="loading-text">正在加载音频资源...</div>
         </div>
-    </div>
+    </main>
 
-    <script src="scripts.js"></script>
+    <!-- 无JavaScript提示 -->
+    <noscript>
+        <div class="noscript-warning">
+            <h2>需要启用JavaScript</h2>
+            <p>Mixing Bench是一个依赖JavaScript的应用程序。请启用JavaScript以获得完整的功能体验。</p>
+        </div>
+    </noscript>
+
+    <script src="scripts.js" defer></script>
 </body>
 </html>
