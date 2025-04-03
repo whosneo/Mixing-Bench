@@ -170,6 +170,7 @@ class AudioMixer {
         this.masterVolume = 1;
         this.trackVolumes = {}; // 存储各个音轨的音量
         this.trackCount = 4; // 默认创建4条音轨
+        this.MAX_TRACK_COUNT = 6; // 最大音轨数量
         this.loadingCount = 0; // 跟踪正在加载的音频数量
         
         // 添加操作标识符，用于防止过时操作影响状态
@@ -213,6 +214,9 @@ class AudioMixer {
     init() {
         // 设置WebAudio上下文
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // 初始化加载指示器
+        this.loadingIndicator = document.getElementById('loadingIndicator');
         
         // 初始化混音器状态
         this.isPaused = true;
@@ -813,9 +817,9 @@ class AudioMixer {
 
     // 新增添加音轨方法
     addTrack() {
-        // 限制最大音轨数量为8条
-        if (this.trackCount >= 8) {
-            this.showNotification('最多只能添加8条音轨');
+        // 限制最大音轨数量
+        if (this.trackCount >= this.MAX_TRACK_COUNT) {
+            this.showNotification('最多只能添加' + this.MAX_TRACK_COUNT + '条音轨');
             return;
         }
         
@@ -1779,18 +1783,9 @@ class AudioMixer {
             }
             
             // 移除这个MutationObserver
-            if (observer) {
-                try {
-                    // 从跟踪数组中移除
-                    const observerIndex = this.activeObservers.indexOf(observer);
-                    if (observerIndex > -1) {
-                        this.activeObservers.splice(observerIndex, 1);
-                    }
-                    observer.disconnect();
-                    observer = null;
-                } catch (e) {
-                    console.error('断开MutationObserver连接时出错:', e);
-                }
+            if (trackItem._removalObserver) {
+                trackItem._removalObserver.disconnect();
+                delete trackItem._removalObserver;
             }
         };
         
@@ -1799,39 +1794,30 @@ class AudioMixer {
             trackItem.dataset.itemId = 'track_item_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
         }
         
-        // 使用MutationObserver监听元素是否被移除
-        let observer = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
-                    // 只关心包含当前轨道项的变化
-                    for (let i = 0; i < mutation.removedNodes.length; i++) {
-                        const removedNode = mutation.removedNodes[i];
-                        // 检查是否是当前轨道项或包含当前轨道项
-                        if (removedNode === trackItem || 
-                            (removedNode.contains && removedNode.contains(trackItem))) {
-                            console.log(`MutationObserver: 检测到轨道项 ${trackItem.dataset.itemId} 被移除`);
-                            cleanupTrackItem();
-                            break;
+        // 使用MutationObserver监听trackItem是否被移除，以便进行清理
+        const removalObserver = (function(element, callback) {
+            const obs = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'childList') {
+                        for (const removed of mutation.removedNodes) {
+                            if (removed === element || (removed.contains && removed.contains(element))) {
+                                console.log(`MutationObserver: 检测到轨道项 ${element.dataset.itemId} 被移除`);
+                                callback();
+                                obs.disconnect();
+                                return;
+                            }
                         }
                     }
                 }
+            });
+            if (element.parentElement) {
+                obs.observe(element.parentElement, { childList: true });
             }
-        });
-        
-        // 开始观察父元素
-        if (trackLane) {
-            try {
-                observer.observe(trackLane, { childList: true, subtree: false });
-                
-                // 保存到该轨道项的数据集中，便于后续引用
-                trackItem.dataset.observerId = this.activeObservers.length;
-                
-                // 将observer添加到跟踪数组中
-                this.activeObservers.push(observer);
-            } catch (e) {
-                console.error('设置MutationObserver时出错:', e);
-            }
-        }
+            return obs;
+        })(trackItem, cleanupTrackItem);
+
+        // 将 observer 存储在元素的自定义属性中，便于后续清理
+        trackItem._removalObserver = removalObserver;
         
         // 添加鼠标和触摸事件监听
         trackItem.addEventListener('mousedown', handleTrackItemDrag);
@@ -2080,18 +2066,6 @@ class AudioMixer {
         
         console.log(`正在删除轨道项: URL=${url}, 轨道ID=${trackId}`);
         
-        // 查找此轨道项的MutationObserver并先断开连接
-        // 这样可以防止触发其他轨道项的事件处理程序
-        const observerToRemove = this.findObserverForTrackItem(trackItem);
-        if (observerToRemove) {
-            const observerIndex = this.activeObservers.indexOf(observerToRemove);
-            if (observerIndex > -1) {
-                this.activeObservers.splice(observerIndex, 1);
-            }
-            observerToRemove.disconnect();
-            console.log('已断开轨道项的MutationObserver连接');
-        }
-        
         // 清理与此特定轨道项相关的音频资源
         if (this.currentAudio.has(url)) {
             const audio = this.currentAudio.get(url);
@@ -2179,39 +2153,6 @@ class AudioMixer {
         if (trackLane && trackLane.querySelectorAll('.track-item').length === 0) {
             console.log('轨道现在为空');
         }
-    }
-    
-    // 新方法：根据trackItem查找对应的MutationObserver
-    findObserverForTrackItem(trackItem) {
-        if (!this.activeObservers || !this.activeObservers.length) {
-            return null;
-        }
-        
-        // 遍历活跃的观察者
-        for (const observer of this.activeObservers) {
-            // MutationObserver没有直接的方法来检查它监视哪个元素
-            // 但我们可以通过观察一个临时元素并检查是否触发来判断
-            
-            // 这是一个启发式方法：
-            // 我们尝试断开后重新连接，如果它正在监视trackItem的父元素，就找到了
-            if (trackItem.parentElement) {
-                try {
-                    // 临时断开连接
-                    observer.disconnect();
-                    
-                    // 重新连接到trackItem的父元素
-                    observer.observe(trackItem.parentElement, { childList: true });
-                    
-                    // 假设这是正确的观察者
-                    return observer;
-                } catch (e) {
-                    // 这不是正确的观察者，继续尝试
-                    continue;
-                }
-            }
-        }
-        
-        return null;
     }
     
     // 优化的检查URL是否被其他轨道项使用的方法
@@ -2435,7 +2376,7 @@ class AudioMixer {
             
             // 重置音频状态
             audio.currentTime = 0;
-            audio.volume = trackVolume * (this.masterVolume / 100);
+            audio.volume = trackVolume * this.masterVolume;
             
             // 确保移除之前可能存在的事件监听器
             audio.onended = null;

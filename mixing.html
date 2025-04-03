@@ -12,42 +12,46 @@
 </head>
 <body>
     <div class="container">
-        <div class="audio-grid" id="audioGrid"></div>
-
-        <div class="controls">
-            <button class="control-btn" id="playTrack">
-                <i class="fas fa-play" id="playIcon"></i>
-            </button>
-            <button class="control-btn" id="stop">
-                <i class="fas fa-stop"></i>
-            </button>
-            <!-- 添加主音量控制 -->
-            <div class="volume-control">
-                <i class="fas fa-volume-up"></i>
-                <input type="range" id="masterVolume" class="volume-slider" min="0" max="100" value="100">
+        <div class="layout">
+            <div class="sidebar">
+                <div class="audio-grid" id="audioGrid"></div>
             </div>
-            <!-- 添加音轨管理按钮 -->
-            <div class="track-management">
-                <button class="control-btn track-control-btn" id="addTrack" title="添加音轨">
-                    <i class="fas fa-plus"></i>
-                </button>
-                <button class="control-btn track-control-btn" id="removeTrack" title="删除音轨">
-                    <i class="fas fa-minus"></i>
-                </button>
+            <div class="main-content">
+                <div class="controls">
+                    <button class="control-btn" id="playTrack">
+                        <i class="fas fa-play" id="playIcon"></i>
+                    </button>
+                    <button class="control-btn" id="stop">
+                        <i class="fas fa-stop"></i>
+                    </button>
+                    <!-- 添加主音量控制 -->
+                    <div class="volume-control">
+                        <i class="fas fa-volume-up"></i>
+                        <input type="range" id="masterVolume" class="volume-slider" min="0" max="100" value="100">
+                    </div>
+                    <!-- 添加音轨管理按钮 -->
+                    <div class="track-management">
+                        <button class="control-btn track-control-btn" id="addTrack" title="添加音轨">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                        <button class="control-btn track-control-btn" id="removeTrack" title="删除音轨">
+                            <i class="fas fa-minus"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="track-area" id="trackArea">
+                    <div class="time-axis" id="timeAxis">
+                        <!-- 时间轴将由JS动态生成 -->
+                    </div>
+                    <div class="track-container" id="trackContainer">
+                        <div class="track-lane" data-track-name="音轨 1" id="track1"></div>
+                        <div class="track-lane" data-track-name="音轨 2" id="track2"></div>
+                        <div class="track-lane" data-track-name="音轨 3" id="track3"></div>
+                        <div class="track-lane" data-track-name="音轨 4" id="track4"></div>
+                    </div>
+                    <div class="playback-indicator" id="playbackIndicator"></div>
+                </div>
             </div>
-        </div>
-
-        <div class="track-area" id="trackArea">
-            <div class="time-axis" id="timeAxis">
-                <!-- 时间轴将由JS动态生成 -->
-            </div>
-            <div class="track-container" id="trackContainer">
-                <div class="track-lane" data-track-name="音轨 1" id="track1"></div>
-                <div class="track-lane" data-track-name="音轨 2" id="track2"></div>
-                <div class="track-lane" data-track-name="音轨 3" id="track3"></div>
-                <div class="track-lane" data-track-name="音轨 4" id="track4"></div>
-            </div>
-            <div class="playback-indicator" id="playbackIndicator"></div>
         </div>
         
         <!-- 添加加载状态指示器 -->

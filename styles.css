@@ -18,18 +18,13 @@ body {
 }
 
 .container {
-    max-width: 1200px;
-    margin: 0 auto;
     box-sizing: border-box;
-    width: 100%;
-    padding-right: calc(20px + var(--scrollbar-width, 15px));
 }
 
 .audio-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 1rem;
-    margin: 2rem 0;
     width: 100%;
     box-sizing: border-box;
 }
@@ -37,7 +32,7 @@ body {
 .audio-item {
     background: white;
     border-radius: 10px;
-    padding: 0.7rem;
+    padding: 0.5rem;
     cursor: move;
     box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -45,7 +40,7 @@ body {
     align-items: center;
     gap: 0.5rem;
     position: relative;
-    min-height: 50px;
+    min-height: 30px;
 }
 
 .audio-item:hover {
@@ -154,9 +149,7 @@ body {
     border: 2px dashed var(--secondary-color);
     border-radius: 20px;
     padding: 1.5rem 1.5rem 1.5rem 115px; /* 增加左侧padding以容纳音轨标识和音量控制 */
-    margin: 3rem 0;
     position: relative;
-    min-height: 200px;
 }
 
 /* 修改播放指示器样式，增强拖动功能 */
@@ -166,13 +159,14 @@ body {
     bottom: 0;
     width: 4px; /* 增加宽度，使其更容易点击 */
     background-color: red;
-    z-index: 50; /* 确保指示器在最上层 */
+    z-index: 100; /* 提高z-index确保显示在最上层 */
     pointer-events: all; /* 确保可以响应鼠标事件 */
     box-shadow: 0 0 5px rgba(255, 0, 0, 0.5);
     transition: none; /* 默认不使用过渡动画 */
     left: 115px; /* 初始位置 */
     cursor: grab; /* 使用grab光标 */
     touch-action: none; /* 禁止触摸事件的默认行为 */
+    height: 100%; /* 确保高度覆盖整个容器 */
 }
 
 .playback-indicator::after {
@@ -219,13 +213,15 @@ body {
     flex-direction: column;
     gap: 1.5rem;
     position: relative;
+    width: 100%; /* 确保宽度占满父容器 */
+    min-height: 100%; /* 确保至少占满容器高度 */
 }
 
 .track-lane {
     background: rgba(255, 255, 255, 0.9);
     border-radius: 12px;
     padding: 0.5rem;
-    min-height: 72px;
+    min-height: 48px;
     position: relative;
     display: grid;
     grid-template-columns: repeat(30, 1fr);
@@ -390,7 +386,6 @@ body {
 
 .controls {
     text-align: center;
-    margin: 3rem 0;
     display: flex;
     justify-content: center;
     gap: 1.5rem;
@@ -572,4 +567,26 @@ body {
     .track-item:active, .audio-item:active, .control-btn:active {
         transform: scale(0.98);
     }
+}
+
+/* 新增布局样式 */
+.layout {
+    display: flex;
+    flex-direction: row;
+    gap: 20px;
+    height: calc(100vh - 40px); /* 考虑 body 的上下内边距 */
+}
+
+.sidebar {
+    width: 300px;
+    box-sizing: border-box;
+    scrollbar-gutter: stable;
+    padding-right: 8px;
+}
+
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
 }
